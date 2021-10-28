@@ -301,6 +301,7 @@ sm = {
         if (id == "server") {
           sm.SERVE();
           document.getElementById("client").disabled = false;
+          document.querySelector("#sessions.hide").classList.remove("hide");
         } else {
           sm.log[uid].e.unshift({
             time: Date.now(),
