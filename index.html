@@ -1,23 +1,23 @@
 <h2>HTTPRelay-js</h2>
 <form id="relay" onSubmit="return false">
-<fieldset>
-  <button id="server" disabled>server</button>
-  <button id="client" disabled>client</button>
-  <input onBlur="sm.proxy_add(this.value, 'user')" placeholder="username" />
-  <input type="color" onChange="sm.proxy_add(this.value, 'color')" />
-  <br clear="both" />
-  <button onClick="sm.proxy_add(Math.random().toFixed(8))">random</button>
-  <select onChange="sm.proxy_add(this.value)">
-    <option disabled selected>fixed</option>
-    <option value="A">A</option>
-    <option value="B">B</option>
-  </select>
-  <input class="w50" type="file" onChange="sm.proxy_add(this, 'file')" />
-</fieldset>
-<fieldset id="sessions" class="hide">
-  <input id="purge" type="checkbox" />
-  <input id="gets" type="number" min="2" max="16" placeholder="# clients" />
-</fieldset>
+  <fieldset>
+    <button id="server" disabled>server</button>
+    <button id="client" disabled>client</button>
+    <input onBlur="sm.proxy_add(this.value, 'user')" placeholder="username" />
+    <input type="color" onChange="sm.proxy_add(this.value, 'color')" />
+    <br clear="both" />
+    <button onClick="sm.proxy_add(Math.random().toFixed(8))">random</button>
+    <select onChange="sm.proxy_add(this.value)">
+      <option disabled selected>fixed</option>
+      <option value="A">A</option>
+      <option value="B">B</option>
+    </select>
+    <input class="w50" type="file" onChange="sm.proxy_add(this, 'file')" />
+  </fieldset>
+  <fieldset id="sessions" class="hide">
+    <input id="purge" type="checkbox" />
+    <input id="gets" type="number" min="2" max="16" placeholder="# clients" />
+  </fieldset>
 </form>
 
 <section class="hide">
@@ -44,7 +44,11 @@
       sm.proxy = "//demo.httprelay.io/proxy/" + sm.log.c.uid;
       sm.proxy_init();
       window.onbeforeunload = function() {
-        sm.GET({},true);
+        // no cfg in GET on start/stop for uid
+        // SERVE blocks uid.c.time==null
+        // maybe 2 events, as timer cant be cancelled so 
+        // ev1: time=null, ev2: {unload:params}
+        sm.GET(Infinity);
       };
     }
     document.head.appendChild(script);
@@ -73,7 +77,7 @@
   fieldset button,
   fieldset input,
   fieldset select,
-  fieldset label{
+  fieldset label {
     width: calc(25% - 0.25rem);
     max-width: 8rem;
     height: 1.5rem;
@@ -82,28 +86,30 @@
     float: left;
     margin: 0.125rem;
     box-sizing: border-box;
-    position:relative;
-    border:0.125rem solid #ccc;
-    border-radius:0.25rem;
+    position: relative;
+    border: 0.125rem solid #ccc;
+    border-radius: 0.25rem;
   }
-  fieldset input[type=file]{border:none;}
-  
-  fieldset input[type=checkbox]{
-   appearance: none;
+
+  fieldset input[type=file] {
+    border: none;
   }
-  
-  fieldset input[type=checkbox]:after{
+
+  fieldset input[type=checkbox] {
+    appearance: none;
+  }
+
+  fieldset input[type=checkbox]:after {
     content: attr(id);
-    position:absolute;
-    width:100%;
+    position: absolute;
+    width: 100%;
     height: 100%;
-    
-    text-align:center;
+    text-align: center;
   }
-  fieldset input[type=checkbox]:checked:after{
-   background:#80ffc0;
+
+  fieldset input[type=checkbox]:checked:after {
+    background: #80ffc0;
   }
-  
 
   fieldset input.w50 {
     width: calc(50% - 0.25rem);
@@ -120,7 +126,8 @@
     font-size: 1rem;
   }
 
-  .hide a, #sessions.hide{
+  .hide a,
+  #sessions.hide {
     display: none;
   }
 
