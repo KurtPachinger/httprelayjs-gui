@@ -15,6 +15,7 @@ sm = {
       sm.log.c.uid
     );
     proxy.routes.addGet("/log", "log", (ctx) => {
+      // ...coerce invalid JSON to Number("NaN")
       let log = JSON.parse(
         decodeURIComponent(ctx.request.url.searchParams.get("log"))
       );
@@ -25,54 +26,57 @@ sm = {
         return {};
       }
 
-      // branch to master, and users status
+      // globals
       let uid = sm.log[log.c.uid];
       let cfg = sm.log.c;
       cfg.time = Date.now();
-      let blocked = cfg.bak.indexOf(log.c.uid) !== -1;
+      const blocked = cfg.bak.indexOf(log.c.uid) !== -1;
 
       // sm.gets may increase but NOT decrease
       let is_full =
         cfg.gets >= sm.gets && log.e[0] && log.e[0].value == "connect";
 
-      if (uid == undefined || !log.e.length || is_full) {
+      if (uid === undefined || !log.e.length || is_full) {
         // new uid needs master branch
         // or uid blocked
         // or new user had no connect event
         let branch = { c: { uid: log.c.uid, hint: -1 }, e: [] };
-        if (blocked || (uid == undefined && !log.e.length) || is_full) {
+        if (blocked || (uid === undefined && !log.e.length) || is_full) {
           // return error status to user (improper, blocked, full)
           console.log("user denied");
+          // error code if user
+          if (is_full) {
+            branch.c.time = "-Infinity";
+          }
           return branch;
-        } else if (uid == undefined && log.e.length) {
+        } else if (uid === undefined && log.e.length) {
           // new master branch
           uid = sm.log[log.c.uid] = branch;
         }
       }
 
-      // branch meta
-      Object.keys(log.c).forEach((key) => {
-        if (key != "uid") {
-          uid.c[key] = log.c[key];
+      // log meta to master branch
+      Object.keys(log.c).forEach((cfg) => {
+        if (cfg !== "uid") {
+          uid.c[cfg] = log.c[cfg];
         }
       });
-      if (log.c.uid != cfg.uid) {
-        // branch events not server's own
+      // log events to master branch
+      if (log.c.uid !== cfg.uid) {
         for (let i = 0; i < log.e.length; i++) {
-          //console.log("event", log.e[event]);
           uid.e.push(log.e[i]);
         }
       }
 
-      // prune stable & users
-      // audit sessions
-
-      let revlist = {c:{time:cfg.time}};
+      // prune server old, sent client new
+      let revlist = { c: { time: cfg.time } };
       let g = 0;
       Object.keys(sm.log).forEach((key) => {
         if (key !== "c") {
           //console.log("master key", key);
+
           let user = sm.log[key];
+
           let u = (revlist[key] = { c: user.c });
           for (let i = user.e.length - 1; i >= 0; i--) {
             // user events
@@ -91,32 +95,33 @@ sm = {
                 }
               }
             }
-            // revlist: get updates since last  
+            // revlist: get updates since last
             // event times after group "head" was flawed approach
             // time interval pushback is better
             // ...but interval variance leaves gaps
-            let last_this = log.c.time - sm.to;
-            let last_that = user.c.time - (sm.to*2);
-            let last = (eventCurr.time >= last_this) && (eventCurr.time >= last_that) && eventCurr.time <= cfg.time;
-            if (uid.c.hint == -1 || (last )) {
-              if (log.c.uid != user.c.uid) {
+            let last_this = eventCurr.time >= log.c.time - sm.to;
+            let last_that = eventCurr.time >= user.c.time - sm.to;
+            let last = (last_this || last_that) && eventCurr.time <= log.c.time;
+            if (uid.c.hint == -1 || user.c.hint == -1 || last) {
+              // new user(s) or events since last
+              if (!blocked && log.c.uid != user.c.uid) {
                 // commits to revlist, unless own user
                 u[eventCurr.time] = eventCurr;
               }
             }
           }
 
-          let blocked = cfg.bak.indexOf(user.c.uid) !== -1;
-          if (!blocked || sm.purge) {
+          let block = cfg.bak.indexOf(user.c.uid) !== -1;
+          if (!block || sm.purge) {
             // users session criterion to reduce zombies
             const is_server = cfg.uid == user.c.uid;
             let active = !!(user.e.length > 1 || user.c.user);
             let recent = 120000 >= cfg.time - user.e[0].time;
-            const is_unload = user.c.time == null || (!active && !recent);
+            const is_unload = user.c.hint == Infinity || (!active && !recent);
 
             if (!is_server && is_unload) {
               // prune users
-              cfg.bak.push(user.c.uid);
+              !block && cfg.bak.push(user.c.uid);
               if (user.e.length <= 1 || sm.purge) {
                 // prune _empty_ backlog
                 delete sm.log[user.c.uid];
@@ -131,13 +136,15 @@ sm = {
 
       // users active
       cfg.gets = g;
+      // timestamp log to master branch
+      uid.c.time = log.c.time;
+
       // user latency
       let deltaUser = (cfg.time - uid.c.time) / g;
       deltaUser = Math.max(1 - deltaUser / sm.to, 0);
-      revlist.c.hint = uid.c.hint = deltaUser;
-      // timestamp master branch from log
-      uid.c.time = log.c.time;
+      uid.c.hint = uid.c.hint == Infinity ? 0 : deltaUser;
       // note: timestamp of server as client is more current than updates
+
       return revlist;
     });
     proxy.assets.addFetch("//codepen.io/kpachinger/pen/VwzmKJV.html", {
@@ -149,35 +156,33 @@ sm = {
     // start server
     proxy.start();
   },
-  GET: function (cfg, unload) {
+  GET: function (cfg) {
     // consume endpoint, push branch
     let branch = sm.log[uid];
     let last = branch.c.time || -Infinity;
-    //const time = Date.now();
 
-    //branch.c.time = time;
-    if (unload) {
-      branch.c.hint = 0;
-    } else if (cfg && cfg.hint == -1) {
-      branch.c.time = -Infinity;
-      branch.c.hint = 0;
+    if (cfg && cfg.hint === -1) {
+      // critical event
+      branch.c.time = "-Infinity";
+    } else {
+      // time for reverse-parse and latency
+      branch.c.time = Date.now();
     }
+    branch.c.hint = cfg === Infinity ? "Infinity" : 0;
 
+    // local user events since last GET
     let params = { c: branch.c, e: [] };
-    // filter user events by last server time
     for (let i = branch.e.length - 1; i >= 0; i--) {
       let event = branch.e[i];
       if (event.time < last) {
-        // events should not share timestamps
+        // event timestamps unique...?
         break;
       }
       params.e.unshift(event);
     }
-    // send with time for latency
-    params.c.time = unload ? null : Date.now();
-    params = encodeURIComponent(JSON.stringify(params));
 
     // route has 20-minute cache ( max 2048KB ~= 2MB )
+    params = encodeURIComponent(JSON.stringify(params));
     fetch(sm.proxy + "/log?log=" + params, {
       keepalive: true
     })
@@ -187,22 +192,32 @@ sm = {
       .then((data) => {
         return data ? JSON.parse(data) : {};
       })
-      .then((revlist) => {
-        console.log("revlist", revlist);
-        // schedule GET
-        let cfg = revlist && revlist.c ? revlist.c : null;
+      .then((response) => {
+        console.log("revlist", response);
         clearTimeout(sm.sto);
-        sm.sto = setTimeout(function () {
-          sm.GET(cfg, unload);
-        }, sm.to);
+        let revlist = response;
+        let cfg = revlist && revlist.c ? revlist.c : null;
+        let revlogs = document.getElementById("revlist");
+        let toast = document.createElement("article");
+        revlogs.appendChild(toast);
 
+        // cfg callback: error handling
         if (!cfg || cfg.hint === -1) {
-          console.log("no access, config...");
-          return;
+          if (cfg.time == -Infinity) {
+            toast.innerText = "error: session users max";
+          } else {
+            // error fatal
+            toast.innerText = "error: session expired";
+            return;
+          }
+        } else {
+          sm.log[uid].c.time = cfg.time;
         }
-     
-        // next GET fetches all local events since last
-        sm.log[uid].c.time = cfg.time;
+
+        // schedule GET
+        sm.sto = setTimeout(function () {
+          sm.GET(cfg);
+        }, sm.to);
 
         // local logs
         document.getElementById("local").innerText = JSON.stringify(
@@ -212,7 +227,7 @@ sm = {
         );
 
         // revlist cards
-        let toast = document.createElement("article");
+
         toast.setAttribute("data-time", cfg.time || 0);
         let fragment = new DocumentFragment();
         for (var key in revlist) {
@@ -234,7 +249,7 @@ sm = {
             if (isFinite(color) && color <= 27) {
               card.style.color = "#fff";
             }
-            let hint = 90 * merge.c.hint;
+            let hint = 90 * (merge.c && merge.c.hint) || 0;
             hint = "hsl(" + hint + ", 100%, 50%)";
             card.style.boxShadow = "inset 0.25rem 0 " + hint;
           }
@@ -249,12 +264,11 @@ sm = {
         toast.appendChild(fragment);
 
         // revlist new add
-        let revlist = document.getElementById("revlist");
-        revlist.appendChild(toast);
-        //toast.scrollIntoView();
+
+        toast.scrollIntoView();
 
         // revlist old remove
-        let articles = revlist.getElementsByTagName("article");
+        let articles = revlogs.getElementsByTagName("article[data-time]");
         for (let i = articles.length - 1; i >= 0; i--) {
           let article = articles[i];
           let time = article.getAttribute("data-time");
