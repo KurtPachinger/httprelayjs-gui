@@ -1,6 +1,6 @@
 sm = {
   proxy: "//demo.httprelay.io/proxy/" + uid,
-  to: 5000,
+  to: 2500,
   gets: 2,
   log: {
     c: { uid: uid, time: -Infinity, bak: [] },
@@ -27,12 +27,13 @@ sm = {
 
       // branch to master, and users status
       let uid = sm.log[log.c.uid];
-      let backup = sm.log.c.bak;
-      let blocked = backup.indexOf(log.c.uid) !== -1;
+      let cfg = sm.log.c;
+      cfg.time = Date.now();
+      let blocked = cfg.bak.indexOf(log.c.uid) !== -1;
 
       // sm.gets may increase but NOT decrease
       let is_full =
-        sm.log.c.gets >= sm.gets && log.e[0] && log.e[0].value == "connect";
+        cfg.gets >= sm.gets && log.e[0] && log.e[0].value == "connect";
 
       if (uid == undefined || !log.e.length || is_full) {
         // new uid needs master branch
@@ -55,8 +56,8 @@ sm = {
           uid.c[key] = log.c[key];
         }
       });
-      if (log.c.uid != sm.log.c.uid) {
-        // branch events
+      if (log.c.uid != cfg.uid) {
+        // branch events not server's own
         for (let i = 0; i < log.e.length; i++) {
           //console.log("event", log.e[event]);
           uid.e.push(log.e[i]);
@@ -65,25 +66,23 @@ sm = {
 
       // prune stable & users
       // audit sessions
-      let revlist = {};
-      let t = null,
-        g = 0;
+
+      let revlist = {c:{time:cfg.time}};
+      let g = 0;
       Object.keys(sm.log).forEach((key) => {
-        if (key != "c") {
+        if (key !== "c") {
           //console.log("master key", key);
           let user = sm.log[key];
           let u = (revlist[key] = { c: user.c });
           for (let i = user.e.length - 1; i >= 0; i--) {
             // user events
             let eventCurr = user.e[i];
-            if (eventCurr.time < sm.log.c.time) {
+            if (eventCurr.time < log.c.time) {
               // time before head
               for (let j = i - 1; j >= 1; j--) {
-                // prune events
+                // prune, blacklist, etc.
                 let eventPrev = user.e[j];
-                let blacklist = eventCurr.type == "blacklist";
                 if (
-                  !blacklist &&
                   eventCurr.id == eventPrev.id &&
                   eventCurr.value == eventPrev.value
                 ) {
@@ -92,30 +91,32 @@ sm = {
                 }
               }
             }
-            // time after head
-            if (uid.c.hint == -1 || eventCurr.time >= sm.log.c.time) {
+            // revlist: get updates since last  
+            // event times after group "head" was flawed approach
+            // time interval pushback is better
+            // ...but interval variance leaves gaps
+            let last_this = log.c.time - sm.to;
+            let last_that = user.c.time - (sm.to*2);
+            let last = (eventCurr.time >= last_this) && (eventCurr.time >= last_that) && eventCurr.time <= cfg.time;
+            if (uid.c.hint == -1 || (last )) {
               if (log.c.uid != user.c.uid) {
                 // commits to revlist, unless own user
                 u[eventCurr.time] = eventCurr;
               }
             }
           }
-          
-          
 
-          blocked = backup.indexOf(user.c.uid) !== -1;
+          let blocked = cfg.bak.indexOf(user.c.uid) !== -1;
           if (!blocked || sm.purge) {
-            
             // users session criterion to reduce zombies
-            const time = user.c.time;
-            const is_server = sm.log.c.uid == user.c.uid;
+            const is_server = cfg.uid == user.c.uid;
             let active = !!(user.e.length > 1 || user.c.user);
-            let recent = 60000 >= sm.log.c.time - user.e[0].time;
-            const is_unload = time === null || (!active && !recent);
+            let recent = 120000 >= cfg.time - user.e[0].time;
+            const is_unload = user.c.time == null || (!active && !recent);
 
             if (!is_server && is_unload) {
               // prune users
-              backup.push(user.c.uid);
+              cfg.bak.push(user.c.uid);
               if (user.e.length <= 1 || sm.purge) {
                 // prune _empty_ backlog
                 delete sm.log[user.c.uid];
@@ -123,26 +124,20 @@ sm = {
             } else {
               // audit users
               g++;
-              if (t == null || time < t) {
-                t = time;
-              }
             }
           }
-          
         }
       });
 
-      //
-      // 4
-      sm.log.c.time = t;
-      sm.log.c.gets = g;
-
-      //
-      // 5-8
-      let deltaUser = (Date.now() - uid.c.time) / g;
-      uid.c.hint = Math.max(1 - deltaUser / sm.to, 0);
-
-      revlist.c = sm.log.c;
+      // users active
+      cfg.gets = g;
+      // user latency
+      let deltaUser = (cfg.time - uid.c.time) / g;
+      deltaUser = Math.max(1 - deltaUser / sm.to, 0);
+      revlist.c.hint = uid.c.hint = deltaUser;
+      // timestamp master branch from log
+      uid.c.time = log.c.time;
+      // note: timestamp of server as client is more current than updates
       return revlist;
     });
     proxy.assets.addFetch("//codepen.io/kpachinger/pen/VwzmKJV.html", {
@@ -154,30 +149,32 @@ sm = {
     // start server
     proxy.start();
   },
-  GET: function (unload, cfg) {
+  GET: function (cfg, unload) {
     // consume endpoint, push branch
     let branch = sm.log[uid];
     let last = branch.c.time || -Infinity;
-    const time = Date.now();
+    //const time = Date.now();
 
-    branch.c.time = time;
+    //branch.c.time = time;
     if (unload) {
-      branch.c.time = branch.e[time] = null;
+      branch.c.hint = 0;
     } else if (cfg && cfg.hint == -1) {
-      last = -Infinity;
+      branch.c.time = -Infinity;
+      branch.c.hint = 0;
     }
 
     let params = { c: branch.c, e: [] };
-    // filter user events by time
+    // filter user events by last server time
     for (let i = branch.e.length - 1; i >= 0; i--) {
       let event = branch.e[i];
-      if (event.time <= last) {
+      if (event.time < last) {
         // events should not share timestamps
         break;
       }
       params.e.unshift(event);
     }
-
+    // send with time for latency
+    params.c.time = unload ? null : Date.now();
     params = encodeURIComponent(JSON.stringify(params));
 
     // route has 20-minute cache ( max 2048KB ~= 2MB )
@@ -190,23 +187,22 @@ sm = {
       .then((data) => {
         return data ? JSON.parse(data) : {};
       })
-      .then((remote) => {
-        console.log("remote", remote);
-        if (!remote || !remote.c) {
-          // Error 406 Not Acceptable, empty response...
-          //document.getElementById("client").disabled = false;
-          console.log("no response");
-          //return;
-        } else if (remote.c.gets > 4) {
-          console.log("max user");
-        }
-
+      .then((revlist) => {
+        console.log("revlist", revlist);
         // schedule GET
-        let cfg = remote.c && remote.c.hint == -1 ? remote.c : null;
+        let cfg = revlist && revlist.c ? revlist.c : null;
         clearTimeout(sm.sto);
         sm.sto = setTimeout(function () {
-          sm.GET(unload, cfg);
+          sm.GET(cfg, unload);
         }, sm.to);
+
+        if (!cfg || cfg.hint === -1) {
+          console.log("no access, config...");
+          return;
+        }
+     
+        // next GET fetches all local events since last
+        sm.log[uid].c.time = cfg.time;
 
         // local logs
         document.getElementById("local").innerText = JSON.stringify(
@@ -217,10 +213,10 @@ sm = {
 
         // revlist cards
         let toast = document.createElement("article");
-        toast.setAttribute("data-time", remote.c.time || 0);
+        toast.setAttribute("data-time", cfg.time || 0);
         let fragment = new DocumentFragment();
-        for (var key in remote) {
-          let merge = remote[key];
+        for (var key in revlist) {
+          let merge = revlist[key];
           let card = document.createElement("section");
           // style
           if (key == "c") {
@@ -248,14 +244,14 @@ sm = {
           string = string.slice(0, -1);
           card.innerText = string;
 
-          fragment.prepend(card);
+          fragment.append(card);
         }
         toast.appendChild(fragment);
 
         // revlist new add
         let revlist = document.getElementById("revlist");
         revlist.appendChild(toast);
-        toast.scrollIntoView();
+        //toast.scrollIntoView();
 
         // revlist old remove
         let articles = revlist.getElementsByTagName("article");
@@ -295,7 +291,7 @@ sm = {
 
     function button(e) {
       let target = e.target,
-          id = target.id;
+        id = target.id;
       if (id == "server" || id == "client") {
         target.disabled = true;
         if (id == "server") {
@@ -320,7 +316,7 @@ sm = {
             }
             break;
           default:
-          sm[id] = target.checked;
+            sm[id] = target.checked;
         }
       }
     }
