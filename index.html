@@ -16,7 +16,7 @@
   </fieldset>
   <fieldset id="sessions" class="hide">
     <input id="purge" type="checkbox" />
-    <input id="gets" type="number" min="2" max="16" placeholder="# clients" />
+    <input id="users" type="number" min="2" max="16" placeholder="# users" />
   </fieldset>
 </form>
 
@@ -48,7 +48,7 @@
         // SERVE blocks uid.c.time==null
         // maybe 2 events, as timer cant be cancelled so 
         // ev1: time=null, ev2: {unload:params}
-        sm.GET(Infinity);
+        sm.GET({hint:Infinity});
       };
     }
     document.head.appendChild(script);
