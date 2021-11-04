@@ -3,7 +3,7 @@ sm = {
   to: 2500,
   users: 2,
   log: {
-    c: { uid: uid, time: -Infinity, bak: [] },
+    c: { uid: uid, bak: [] },
     [uid]: {
       c: { uid: uid },
       e: []
@@ -30,39 +30,35 @@ sm = {
       let branch = sm.log[uid];
       let cfg = sm.log.c;
       cfg.time = Date.now();
+      // status
+      let connect = log.e.length && log.e[0].connect;
+      let is_full = connect && cfg.users >= sm.users;
       const blocked = cfg.bak.indexOf(uid) !== -1;
 
-      // users may only increase
-      let connect = log.e.length && log.e[0].value == "connect";
-      let is_full = connect && cfg.users >= sm.users;
-
-      if (is_full || branch === undefined || !log.e.length) {
-        // uid needs master branch
-        // or uid blocked
-        // or uid connect event fail
-        let revlist = { c: { uid: uid, hint: -1 }, e: [] };
-        if (is_full || blocked || (branch === undefined && !log.e.length)) {
-          // return error to user
-          if (is_full) {
-            revlist.c.time = "-Infinity";
-          }
-          return revlist;
-        } else if (branch === undefined && log.e.length) {
+      if (connect || is_full || blocked) {
+        if (is_full || blocked) {
+          log.e = [];
+          let queue = blocked ? "Infinity" : log.c.time;
+          return { c: { time: queue, hint: -1 } };
+        } else if (connect) {
           // new master branch, bump connect timestamp
-          branch = sm.log[uid] = revlist;
+          // ...queue?
+          log.e[0].connect = false;
+          log.e[0].time = log.c.time = cfg.time;
+          branch = sm.log[uid] = log;
         }
       }
 
-      // push branch meta to master
-      Object.keys(log.c).forEach((cfg) => {
-        if (cfg !== "uid") {
+      if (!connect) {
+        // push branch meta to master
+        Object.keys(log.c).forEach((cfg) => {
           branch.c[cfg] = log.c[cfg];
-        }
-      });
-      // push branch events to master
-      if (uid !== cfg.uid) {
-        for (let i = 0; i < log.e.length; i++) {
-          branch.e.push(log.e[i]);
+        });
+        // push branch events to master
+        if (uid !== cfg.uid) {
+          for (let i = 0; i < log.e.length; i++) {
+            branch.e.push(log.e[i]);
+          }
         }
       }
 
@@ -101,10 +97,12 @@ sm = {
           }
 
           // user access control permission
+          // server has no user.e as client should users++
           if (!block || sm.purge) {
             const is_server = cfg.uid == user.c.uid;
-            let active = !!(user.e.length > 1 || user.c.user);
-            let recent = 120000 >= cfg.time - user.e[0].time;
+            //let active = !!(user.e.length > 1 || user.c.user);
+            let active = !!(user.e.length > 1);
+            let recent = is_server || 60000 >= cfg.time - user.e[0].time;
             const is_unload = user.c.time == Infinity || (!active && !recent);
             // prune users
             if (!is_server && is_unload) {
@@ -117,15 +115,14 @@ sm = {
             }
           }
         }
+        // long-running code may try-catch or Promise
       });
 
       // active sessions
       cfg.users = users;
-      // timestamp log to master branch
-      branch.c.time = log.c.time;
       // user latency
       let deltaUser = (cfg.time - branch.c.time) / users;
-      deltaUser = Math.max(1 - deltaUser / sm.to, 0);
+      deltaUser = Math.max(1 - deltaUser / sm.to, 0).toFixed(4);
       branch.c.hint = deltaUser;
       // note: timestamp of server as client is more current than updates
 
@@ -140,28 +137,19 @@ sm = {
 
     proxy.start();
   },
-  GET: function (cfg = {}) {
-    // consume endpoint, push branch
+  GET: function (cfg) {
+    // globals
+    let last = cfg.time;
     let branch = sm.log[uid];
-    let last = branch.c.time || -Infinity;
-    const time = Date.now();
-
-    switch (cfg.hint) {
-      case -1:
-        // critical event, bump connect timestamp
-        branch.c.time = "-Infinity";
-        branch.e[0].time = time;
-        break;
-      case Infinity:
-        branch.c.time = "Infinity";
-        break;
-      default:
-        branch.c.time = time;
+    // push local cfg
+    for (var k in branch.c) {
+      cfg[k] = branch.c[k];
     }
-    branch.c.hint = 0;
+    // bump timestamp
+    cfg.time = isFinite(cfg.time) ? Date.now() : cfg.time;
 
     // local user events since last GET
-    let params = { c: branch.c, e: [] };
+    let params = { c: cfg, e: [] };
     for (let i = branch.e.length - 1; i >= 0; i--) {
       let event = branch.e[i];
       if (event.time < last) {
@@ -182,29 +170,30 @@ sm = {
       .then((data) => {
         return data ? JSON.parse(data) : {};
       })
-      .then((response) => {
-        console.log("revlist", response);
+      .then((revlist) => {
+        //console.log("revlist", revlist);
         clearTimeout(sm.sto);
-        let revlist = response;
-        let cfg = revlist && revlist.c ? revlist.c : null;
+        let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
         let toast = document.createElement("article");
         revlogs.appendChild(toast);
 
         // cfg callback: error handling
-        if (!cfg || cfg.hint === -1) {
-          let err = "access error";
-          if (cfg && cfg.time == -Infinity) {
-            err += ": users max";
-          } else if (cfg.hint !== -1 && cfg !== null) {
-            // error fatal, but intended
-            toast.innerText = err + ": expired";
+        let status = "";
+        if (cfg.hint === -1) {
+          status += "access error";
+          if (cfg.time == "-Infinity") {
+            status += ": max user";
+          } else if (cfg.time == "Infinity") {
+            //or 0?
+            toast.innerText = status + ": expired";
             return;
           }
-          toast.innerText = err;
-        } else {
-          sm.log[uid].c.time = cfg.time;
+          // undefined... reconnect?
+        } else if (cfg.time != 0) {
+          //sm.log[uid].c.time = cfg.time;
         }
+        toast.innerText = status;
 
         // schedule GET
         sm.sto = setTimeout(function () {
@@ -226,8 +215,8 @@ sm = {
           let card = document.createElement("section");
           if (key == "c") {
             if (!server && key.hint != -1) {
-              // pull revlist unless server or error
-              sm.log[key] = merge;
+              // pull revlist cfg unless server or error
+              //sm.log[key] = merge;
             }
             card.style.backgroundColor = "#efefef";
           } else {
@@ -303,31 +292,39 @@ sm = {
           document.querySelector("#sessions.hide").classList.remove("hide");
         } else {
           let user = sm.log[uid];
-          function rand(arr){
+          function rand(arr) {
             return arr[Math.floor(Math.random() * arr.length)];
           }
-          if(!user.c.name){
-            let username = ["Delta", "Gamma", "Vega", "Theta"];
-            username = rand(username);
-            username += "_" + Math.floor(Math.random()*100);
-            user.c.name = username;
+          if (!user.c.user) {
+            let username = "HOST";
+            if (!server) {
+              username = ["Delta", "Gamma", "Vega", "Theta"];
+              username = rand(username);
+              username += "_" + Math.floor(Math.random() * 100);
+            }
+            user.c.user = username;
+            document.getElementById("user").value = username;
           }
-          if(!user.c.color){
-            let color = ["c0", "cf", "ff"];
-            color = "#" + rand(color) + rand(color) + rand(color);
-            user.c.color = server ? "#c0c0c0" : color;
+          if (!user.c.color) {
+            let color = "#c0c0c0";
+            if (!server) {
+              color = ["c0", "cf", "ff"];
+              color = "#" + rand(color) + rand(color) + rand(color);
+            }
+            user.c.color = color;
+            document.getElementById("color").value = color;
           }
-          
+
           user.e.unshift({
             time: Date.now(),
-            value: "connect",
-            id: 8080
+            connect: true
           });
-          sm.GET();
+          sm.GET({ time: "-Infinity" });
         }
       } else {
         switch (id) {
           case "users":
+            // users may only increase
             if (target.value > sm.users) {
               sm[id]++;
             } else {
