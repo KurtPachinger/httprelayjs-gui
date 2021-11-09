@@ -10,7 +10,7 @@ sm = {
     }
   },
   SERVE: function () {
-    // register endpoint
+    // merge push with master, prune master, return revlist
     const proxy = new HttpRelay(new URL("https://demo.httprelay.io")).proxy(
       sm.log.c.uid
     );
@@ -35,6 +35,7 @@ sm = {
       let is_full = connect && cfg.users >= sm.users;
       const blocked = cfg.bak.indexOf(uid) !== -1;
 
+      // user access control
       if (connect || is_full || blocked) {
         if (is_full || blocked) {
           log.e = [];
@@ -63,6 +64,7 @@ sm = {
       }
 
       // events: prune server old, sent client new
+      //let head = log.e.length ? cfg.time : -1;
       let revlist = { c: { time: cfg.time } };
       let users = 0;
       Object.keys(sm.log).forEach((key) => {
@@ -96,8 +98,7 @@ sm = {
             }
           }
 
-          // user access control permission
-          // server has no user.e as client should users++
+          // user access control
           if (!block || sm.purge) {
             const is_server = cfg.uid == user.c.uid;
             //let active = !!(user.e.length > 1 || user.c.user);
@@ -124,7 +125,6 @@ sm = {
       let deltaUser = (cfg.time - branch.c.time) / users;
       deltaUser = Math.max(1 - deltaUser / sm.to, 0).toFixed(4);
       branch.c.hint = deltaUser;
-      // note: timestamp of server as client is more current than updates
 
       return revlist;
     });
@@ -171,7 +171,7 @@ sm = {
         return data ? JSON.parse(data) : {};
       })
       .then((revlist) => {
-        //console.log("revlist", revlist);
+        console.log("revlist", revlist);
         clearTimeout(sm.sto);
         let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
@@ -225,7 +225,10 @@ sm = {
             card.style.backgroundColor = color;
             // text legible
             color = color.replace("#", "").replace("initial", "FFFFFF");
-            color = +color.charAt(0) + +color.charAt(2) + +color.charAt(4);
+            color =
+              Number(color.charAt(0)) +
+              Number(color.charAt(2)) +
+              Number(color.charAt(4));
             if (isFinite(color) && color <= 27) {
               card.style.color = "#fff";
             }
@@ -243,7 +246,7 @@ sm = {
           fragment.append(card);
         }
         toast.appendChild(fragment);
-        toast.scrollIntoView();
+        //toast.scrollIntoView();
 
         // revlist old remove
         let articles = revlogs.getElementsByTagName("article[data-time]");
@@ -291,10 +294,11 @@ sm = {
           document.getElementById("client").disabled = false;
           document.querySelector("#sessions.hide").classList.remove("hide");
         } else {
+          // vanity username
           let user = sm.log[uid];
-          function rand(arr) {
+          const rand = function (arr) {
             return arr[Math.floor(Math.random() * arr.length)];
-          }
+          };
           if (!user.c.user) {
             let username = "HOST";
             if (!server) {
@@ -315,6 +319,7 @@ sm = {
             document.getElementById("color").value = color;
           }
 
+          // connect event and GET loop
           user.e.unshift({
             time: Date.now(),
             connect: true
@@ -336,8 +341,6 @@ sm = {
         }
       }
     }
-
-    // vanity username...?
   },
   proxy_add: function (val, type) {
     if (type == "file") {
