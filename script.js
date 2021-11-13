@@ -1,11 +1,13 @@
+/*jshint esversion: 6 */
+
 sm = {
   proxy: "//demo.httprelay.io/proxy/" + uid,
-  to: 2500,
+  to: 10000,
   users: 2,
   log: {
-    c: { uid: uid, bak: [] },
+    c: { uid: uid, auth: {}, users: 0 },
     [uid]: {
-      c: { uid: uid },
+      c: { uid: uid, auth: {} },
       e: []
     }
   },
@@ -26,34 +28,88 @@ sm = {
       }
 
       // globals
+      const time = Date.now();
       const uid = log.c.uid;
       let branch = sm.log[uid];
       let cfg = sm.log.c;
-      cfg.time = Date.now();
-      // status
-      let connect = log.e.length && log.e[0].connect;
-      let is_full = connect && cfg.users >= sm.users;
-      const blocked = cfg.bak.indexOf(uid) !== -1;
 
-      // user access control
-      if (connect || is_full || blocked) {
-        if (is_full || blocked) {
-          log.e = [];
-          let queue = blocked ? "Infinity" : log.c.time;
-          return { c: { time: queue, hint: -1 } };
-        } else if (connect) {
-          // new master branch, bump connect timestamp
-          // ...queue?
-          log.e[0].connect = false;
-          log.e[0].time = log.c.time = cfg.time;
+      // access user
+      let init = log.e.length && log.e[0].init;
+      let auth, uac, is_full;
+      const daemon = function (access, user = uid) {
+        // access server
+        if (access) {
+          if (access == "deny") {
+            cfg.users -= 1;
+            // prune user
+            sm.log[user].c.time = "Infinity";
+            if (sm.log[user].e.length <= 1 || sm.purge) {
+              delete sm.log[user];
+              delete sm.log[cfg.uid].c.auth[user];
+            }
+          } else if (access == "allow") {
+            cfg.users += 1;
+          }
+          cfg.auth[user] = access;
+        }
+        // access user
+        if (user == uid) {
+          auth = cfg.auth[user];
+        }
+        uac = auth != "allow";
+        is_full = uac && cfg.users >= sm.users;
+      };
+
+      let unload = log.c.time == Infinity ? "deny" : false;
+      daemon(unload);
+
+      if (init || uac) {
+        // user access control
+        if (!auth) {
+          // queue or allow
+          let access = is_full ? log.e[0].time : "allow";
+          daemon(access);
+        } else if (isFinite(auth) && !is_full) {
+          // allow oldest queuer
+          let initiate = uid;
+          Object.keys(cfg.auth).forEach(function (user) {
+            let depth = cfg.auth[user];
+            if (isFinite(depth) && depth < cfg.auth[initiate]) {
+              initiate = user;
+            }
+          });
+          daemon("allow", initiate);
+        }
+
+        // abort, no permission
+        if (uac || is_full) {
+          //log.e = [];
+          const queue = function () {
+            // queuer timestamp depth
+            let wait = 0;
+            Object.keys(cfg.auth).forEach(function (user) {
+              let depth = cfg.auth[user];
+              if (isFinite(depth) && depth <= auth) {
+                wait++;
+              }
+            });
+            return -wait;
+          };
+
+          let wait = auth == "deny" ? "Infinity" : queue();
+          return { c: { time: wait, hint: -1 } };
+        } else if (init) {
+          // new master branch, bump access time
+          log.e[0].init = false;
+          log.e[0].time = log.c.time = time;
           branch = sm.log[uid] = log;
         }
       }
 
-      if (!connect) {
-        // push branch meta to master
-        Object.keys(log.c).forEach((cfg) => {
-          branch.c[cfg] = log.c[cfg];
+      if (!init) {
+        // push branch cfg to master
+        Object.keys(log.c).forEach((meta) => {
+          branch.c[meta] = log.c[meta];
         });
         // push branch events to master
         if (uid !== cfg.uid) {
@@ -63,20 +119,31 @@ sm = {
         }
       }
 
+      // latency
+      let delta = (time - branch.c.time) / cfg.users;
+      delta = Math.max(1 - delta / sm.to, 0).toFixed(3);
       // events: prune server old, sent client new
-      //let head = log.e.length ? cfg.time : -1;
-      let revlist = { c: { time: cfg.time } };
+      let revlist = { c: { time: time, hint: delta } };
       let users = 0;
       Object.keys(sm.log).forEach((key) => {
         if (key !== "c") {
           //console.log("master key", key);
           let user = sm.log[key];
           let u = (revlist[key] = { c: user.c });
-          let block = cfg.bak.indexOf(user.c.uid) !== -1;
+          let block = cfg.auth[user.c.uid] == "deny";
+
+          // enroll new uid to peers auth
+          let auths = user.c.auth;
+          if (init && key != uid) {
+            auths[uid] = "init";
+          }
+          // peer events prior to init HEAD
+          let auth = branch.c.auth[user.c.uid];
+          let pull_hard = (auth == "init");
+
           for (let i = user.e.length - 1; i >= 0; i--) {
             let event = user.e[i];
-
-            // prune before head
+            // prune before HEAD (basic test)
             if (event.time < log.c.time) {
               for (let j = i - 1; j >= 1; j--) {
                 let eventPre = user.e[j];
@@ -86,31 +153,32 @@ sm = {
                 }
               }
             }
-
             // commits to revlist, unless own user
             if (uid != user.c.uid) {
               let tip_push = event.time >= log.c.time - sm.to;
               let tip_pull = event.time >= user.c.time - sm.to;
+              // auth new init local
               let HEAD = (tip_push || tip_pull) && event.time <= log.c.time;
-              if ((HEAD && !block) || connect) {
+              if ((HEAD && !block) || init || pull_hard) {
                 u[event.time] = event;
               }
             }
           }
+          // singleton full clone
+          if (pull_hard) {
+            delete branch.c.auth[user.c.uid];
+          }
 
           // user access control
-          if (!block || sm.purge) {
-            const is_server = cfg.uid == user.c.uid;
-            //let active = !!(user.e.length > 1 || user.c.user);
+          const is_server = cfg.uid == user.c.uid;
+          if (!is_server && (!block || sm.purge)) {
+            // server as user skip: count, events, unload...
             let active = !!(user.e.length > 1);
-            let recent = is_server || 60000 >= cfg.time - user.e[0].time;
+            let recent = 60000 >= time - user.e[0].time;
             const is_unload = user.c.time == Infinity || (!active && !recent);
-            // prune users
-            if (!is_server && is_unload) {
-              !block && cfg.bak.push(user.c.uid);
-              if (user.e.length <= 1 || sm.purge) {
-                delete sm.log[user.c.uid];
-              }
+            if (is_unload) {
+              // user access
+              daemon("deny", user.c.uid);
             } else {
               users++;
             }
@@ -119,12 +187,8 @@ sm = {
         // long-running code may try-catch or Promise
       });
 
-      // active sessions
+      // real user count (not uac daemon)
       cfg.users = users;
-      // user latency
-      let deltaUser = (cfg.time - branch.c.time) / users;
-      deltaUser = Math.max(1 - deltaUser / sm.to, 0).toFixed(4);
-      branch.c.hint = deltaUser;
 
       return revlist;
     });
@@ -138,15 +202,18 @@ sm = {
     proxy.start();
   },
   GET: function (cfg) {
-    // globals
-    let last = cfg.time;
     let branch = sm.log[uid];
+    let last = branch.c.time;
+    // PUSH time to local HEAD per success code
+    branch.c.time =
+      isFinite(cfg.time) && cfg.hint >= 0
+        ? Date.now()
+        : branch.c.time || cfg.time;
+
     // push local cfg
-    for (var k in branch.c) {
+    Object.keys(branch.c).forEach(function (k) {
       cfg[k] = branch.c[k];
-    }
-    // bump timestamp
-    cfg.time = isFinite(cfg.time) ? Date.now() : cfg.time;
+    });
 
     // local user events since last GET
     let params = { c: cfg, e: [] };
@@ -159,7 +226,10 @@ sm = {
       params.e.unshift(event);
     }
 
+    // todo: local user auth[] roles
+
     // route has 20-minute cache ( max 2048KB ~= 2MB )
+    console.log("GET push:", params);
     params = encodeURIComponent(JSON.stringify(params));
     fetch(sm.proxy + "/log?log=" + params, {
       keepalive: true
@@ -171,7 +241,7 @@ sm = {
         return data ? JSON.parse(data) : {};
       })
       .then((revlist) => {
-        console.log("revlist", revlist);
+        console.log("GET pull", revlist);
         clearTimeout(sm.sto);
         let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
@@ -182,14 +252,15 @@ sm = {
         let status = "";
         if (cfg.hint === -1) {
           status += "access error";
-          if (cfg.time == "-Infinity") {
-            status += ": max user";
-          } else if (cfg.time == "Infinity") {
+          if (cfg.time == "Infinity") {
             //or 0?
             toast.innerText = status + ": expired";
             return;
+          } else if (cfg.time < 0) {
+            // -Infinity or -queue
+            status += ": max user" + cfg.time;
           }
-          // undefined... reconnect?
+          // undefined... reinit?
         } else if (cfg.time != 0) {
           //sm.log[uid].c.time = cfg.time;
         }
@@ -210,7 +281,7 @@ sm = {
         // revlist cards
         toast.setAttribute("data-time", cfg.time || 0);
         let fragment = new DocumentFragment();
-        for (var key in revlist) {
+        Object.keys(revlist).forEach(function (key) {
           let merge = revlist[key];
           let card = document.createElement("section");
           if (key == "c") {
@@ -244,7 +315,7 @@ sm = {
           card.innerText = string;
           // output
           fragment.append(card);
-        }
+        });
         toast.appendChild(fragment);
         //toast.scrollIntoView();
 
@@ -319,10 +390,10 @@ sm = {
             document.getElementById("color").value = color;
           }
 
-          // connect event and GET loop
+          // init event and GET loop
           user.e.unshift({
             time: Date.now(),
-            connect: true
+            init: true
           });
           sm.GET({ time: "-Infinity" });
         }
