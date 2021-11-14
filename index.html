@@ -1,12 +1,12 @@
-<h2>HTTPRelay-js GUI</h2>
 <form id="relay" onSubmit="return false">
   <fieldset>
+    <legend>HTTPRelay-js Proxy</legend>
     <button id="server" disabled>server</button>
     <button id="client" disabled>client</button>
     <input id="user" onBlur="sm.proxy_add(this.value, 'user')" placeholder="username" />
     <input id="color" type="color" onChange="sm.proxy_add(this.value, 'color')" />
     <br clear="both" />
-    <button onClick="sm.proxy_add(Math.random().toFixed(8))">random</button>
+    <button onClick="sm.proxy_add(Math.random().toFixed(3))">random</button>
     <select onChange="sm.proxy_add(this.value)">
       <option disabled selected>fixed</option>
       <option value="A">A</option>
@@ -139,7 +139,7 @@
   #local,
   #revlist {
     color: #000;
-    height: 32rem;
+    height: calc(100vh - 12rem);
     margin: 0;
     overflow: hidden;
     overflow-y: scroll;
