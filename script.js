@@ -39,11 +39,14 @@ sm = {
       const daemon = function (access, user = uid) {
         // access server
         if (access) {
-          if (access == "deny") {
+          // user with auth denied may retain session
+          let branch = sm.log[user];
+          if (access == "deny" && branch) {
             cfg.users -= 1;
+            branch.c.time = "Infinity";
+            branch.c.hint = 0;
             // prune user
-            sm.log[user].c.time = "Infinity";
-            if (sm.log[user].e.length <= 1 || sm.purge) {
+            if (branch.e.length <= 1 || sm.purge) {
               delete sm.log[user];
               delete sm.log[cfg.uid].c.auth[user];
             }
@@ -139,7 +142,7 @@ sm = {
           }
           // peer events prior to init HEAD
           let auth = branch.c.auth[user.c.uid];
-          let pull_hard = (auth == "init");
+          let pull_hard = auth == "init";
 
           for (let i = user.e.length - 1; i >= 0; i--) {
             let event = user.e[i];
@@ -242,7 +245,6 @@ sm = {
       })
       .then((revlist) => {
         console.log("GET pull", revlist);
-        clearTimeout(sm.sto);
         let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
         let toast = document.createElement("article");
@@ -254,22 +256,22 @@ sm = {
           status += "access error";
           if (cfg.time == "Infinity") {
             //or 0?
-            toast.innerText = status + ": expired";
-            return;
+            status += ": expired";
           } else if (cfg.time < 0) {
             // -Infinity or -queue
             status += ": max user" + cfg.time;
           }
           // undefined... reinit?
-        } else if (cfg.time != 0) {
-          //sm.log[uid].c.time = cfg.time;
         }
         toast.innerText = status;
 
         // schedule GET
-        sm.sto = setTimeout(function () {
-          sm.GET(cfg);
-        }, sm.to);
+        clearTimeout(sm.sto);
+        if (cfg.time != "Infinity") {
+          sm.sto = setTimeout(function () {
+            sm.GET(cfg);
+          }, sm.to);
+        }
 
         // local logs
         document.getElementById("local").innerText = JSON.stringify(
@@ -317,7 +319,7 @@ sm = {
           fragment.append(card);
         });
         toast.appendChild(fragment);
-        //toast.scrollIntoView();
+        toast.scrollIntoView();
 
         // revlist old remove
         let articles = revlogs.getElementsByTagName("article[data-time]");
@@ -363,7 +365,7 @@ sm = {
         if (id == "server") {
           sm.SERVE();
           document.getElementById("client").disabled = false;
-          document.querySelector("#sessions.hide").classList.remove("hide");
+          document.querySelector("#sessions").classList.remove("hide");
         } else {
           // vanity username
           let user = sm.log[uid];
@@ -421,7 +423,7 @@ sm = {
         console.log("FileReader:", reader.result);
         sm.proxy_add(reader.result);
       };
-      reader.readAsDataURL(file);
+      file && reader.readAsDataURL(file);
     } else if (!type) {
       sm.log[uid].e.push({ time: Date.now(), value: val, id: 123 });
     } else {
