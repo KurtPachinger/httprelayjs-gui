@@ -146,16 +146,7 @@ sm = {
 
           for (let i = user.e.length - 1; i >= 0; i--) {
             let event = user.e[i];
-            // prune before HEAD (basic test)
-            if (event.time < log.c.time) {
-              for (let j = i - 1; j >= 1; j--) {
-                let eventPre = user.e[j];
-                if (event.id == eventPre.id && event.value == eventPre.value) {
-                  user.e.splice(j, 1);
-                  i--;
-                }
-              }
-            }
+
             // commits to revlist, unless own user
             if (uid != user.c.uid) {
               let tip_push = event.time >= log.c.time - sm.to;
@@ -164,6 +155,17 @@ sm = {
               let HEAD = (tip_push || tip_pull) && event.time <= log.c.time;
               if ((HEAD && !block) || init || pull_hard) {
                 u[event.time] = event;
+              }
+            }
+
+            // prune before HEAD (basic test)
+            if (event.time < log.c.time) {
+              for (let j = i - 1; j >= 0; j--) {
+                let eventPre = user.e[j];
+                if (event.id == eventPre.id && event.value == eventPre.value) {
+                  user.e.splice(j, 1);
+                  i--;
+                }
               }
             }
           }
@@ -207,12 +209,20 @@ sm = {
   GET: function (cfg) {
     let branch = sm.log[uid];
     let last = branch.c.time;
-    // PUSH time to local HEAD per success code
+    // local HEAD time per response hint
     branch.c.time =
       isFinite(cfg.time) && cfg.hint >= 0
         ? Date.now()
         : branch.c.time || cfg.time;
 
+    // init event
+    let auth = branch.e[0];
+    if (!isFinite(last) && isFinite(branch.c.time)) {
+      // final handshake could utilize cfg.hint 1.000 >= 0
+      auth.init = false;
+      auth.time = cfg.time;
+    }
+    
     // push local cfg
     Object.keys(branch.c).forEach(function (k) {
       cfg[k] = branch.c[k];
@@ -220,16 +230,19 @@ sm = {
 
     // local user events since last GET
     let params = { c: cfg, e: [] };
-    for (let i = branch.e.length - 1; i >= 0; i--) {
-      let event = branch.e[i];
-      if (event.time < last) {
-        // event timestamps unique...?
-        break;
+    if (auth.init) {
+      params.e.unshift(auth);
+    } else {
+      for (let i = branch.e.length - 1; i >= 0; i--) {
+        let event = branch.e[i];
+        if (event.time > last) {
+          // init sends false once more
+          params.e.unshift(event);
+        } else {
+          break;
+        }
       }
-      params.e.unshift(event);
     }
-
-    // todo: local user auth[] roles
 
     // route has 20-minute cache ( max 2048KB ~= 2MB )
     console.log("GET push:", params);
@@ -319,7 +332,7 @@ sm = {
           fragment.append(card);
         });
         toast.appendChild(fragment);
-        toast.scrollIntoView();
+        //toast.scrollIntoView();
 
         // revlist old remove
         let articles = revlogs.getElementsByTagName("article[data-time]");
