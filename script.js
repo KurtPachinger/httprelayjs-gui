@@ -7,7 +7,7 @@ sm = {
   log: {
     c: { uid: uid, auth: {}, users: 0 },
     [uid]: {
-      c: { uid: uid, auth: {} },
+      c: { uid: uid },
       e: []
     }
   },
@@ -63,6 +63,7 @@ sm = {
         is_full = uac && cfg.users >= sm.users;
       };
 
+      // uac
       let unload = log.c.time == Infinity ? "deny" : false;
       daemon(unload);
 
@@ -82,6 +83,7 @@ sm = {
             }
           });
           daemon("allow", initiate);
+          //console.log("allow from queue", uid);
         }
 
         // abort, no permission
@@ -103,22 +105,20 @@ sm = {
           return { c: { time: wait, hint: -1 } };
         } else if (init) {
           // new master branch, bump access time
-          log.e[0].init = false;
           log.e[0].time = log.c.time = time;
           branch = sm.log[uid] = log;
+          branch.c.auth = {};
         }
       }
 
-      if (!init) {
-        // push branch cfg to master
-        Object.keys(log.c).forEach((meta) => {
-          branch.c[meta] = log.c[meta];
-        });
-        // push branch events to master
-        if (uid !== cfg.uid) {
-          for (let i = 0; i < log.e.length; i++) {
-            branch.e.push(log.e[i]);
-          }
+      // push branch cfg to master
+      Object.keys(log.c).forEach((meta) => {
+        branch.c[meta] = log.c[meta];
+      });
+      // push branch events to master
+      if (!init && uid !== cfg.uid) {
+        for (let i = 0; i < log.e.length; i++) {
+          branch.e.push(log.e[i]);
         }
       }
 
@@ -128,27 +128,24 @@ sm = {
       // events: prune server old, sent client new
       let revlist = { c: { time: time, hint: delta } };
       let users = 0;
-      Object.keys(sm.log).forEach((key) => {
-        if (key !== "c") {
+      Object.keys(sm.log).forEach((peer) => {
+        // node, peer, meta
+        if (peer !== "c") {
           //console.log("master key", key);
-          let user = sm.log[key];
-          let u = (revlist[key] = { c: user.c });
-          let block = cfg.auth[user.c.uid] == "deny";
+          let user = sm.log[peer];
+          let u = (revlist[peer] = { c: user.c });
+          let block = cfg.auth[peer] == "deny";
 
-          // enroll new uid to peers auth
-          let auths = user.c.auth;
-          if (init && key != uid) {
-            auths[uid] = "init";
-          }
-          // peer events prior to init HEAD
-          let auth = branch.c.auth[user.c.uid];
-          let pull_hard = auth == "init";
+          // peer init, round-trip events
+          let pull_hard =
+            branch.c.auth[peer] == "init" &&
+            user.e[0].init === false &&
+            user.e.length > 1;
 
           for (let i = user.e.length - 1; i >= 0; i--) {
             let event = user.e[i];
-
             // commits to revlist, unless own user
-            if (uid != user.c.uid) {
+            if (uid != peer) {
               let tip_push = event.time >= log.c.time - sm.to;
               let tip_pull = event.time >= user.c.time - sm.to;
               // auth new init local
@@ -157,7 +154,6 @@ sm = {
                 u[event.time] = event;
               }
             }
-
             // prune before HEAD (basic test)
             if (event.time < log.c.time) {
               for (let j = i - 1; j >= 0; j--) {
@@ -169,13 +165,19 @@ sm = {
               }
             }
           }
-          // singleton full clone
+
+          // peer init, full clone singleton
           if (pull_hard) {
-            delete branch.c.auth[user.c.uid];
+            branch.c.auth[peer] = "done";
+            //delete branch.c.auth[peer];
+          }
+          // peer init, handshake
+          if (init && !block && uid != peer) {
+            user.c.auth[uid] = "init";
           }
 
           // user access control
-          const is_server = cfg.uid == user.c.uid;
+          const is_server = cfg.uid == peer;
           if (!is_server && (!block || sm.purge)) {
             // server as user skip: count, events, unload...
             let active = !!(user.e.length > 1);
@@ -183,17 +185,23 @@ sm = {
             const is_unload = user.c.time == Infinity || (!active && !recent);
             if (is_unload) {
               // user access
-              daemon("deny", user.c.uid);
+              daemon("deny", peer);
             } else {
               users++;
             }
           }
+          
         }
-        // long-running code may try-catch or Promise
+        // async...?
       });
 
       // real user count (not uac daemon)
       cfg.users = users;
+
+      // server/user auth handshake
+      if (init) {
+        log.e[0].init = false;
+      }
 
       return revlist;
     });
@@ -222,7 +230,7 @@ sm = {
       auth.init = false;
       auth.time = cfg.time;
     }
-    
+
     // push local cfg
     Object.keys(branch.c).forEach(function (k) {
       cfg[k] = branch.c[k];
@@ -245,7 +253,6 @@ sm = {
     }
 
     // route has 20-minute cache ( max 2048KB ~= 2MB )
-    console.log("GET push:", params);
     params = encodeURIComponent(JSON.stringify(params));
     fetch(sm.proxy + "/log?log=" + params, {
       keepalive: true
@@ -257,7 +264,7 @@ sm = {
         return data ? JSON.parse(data) : {};
       })
       .then((revlist) => {
-        console.log("GET pull", revlist);
+        console.log("revlist", revlist);
         let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
         let toast = document.createElement("article");
@@ -283,6 +290,7 @@ sm = {
         if (cfg.time != "Infinity") {
           sm.sto = setTimeout(function () {
             sm.GET(cfg);
+            // tried AIMD/throttle, but revlist uses -interval
           }, sm.to);
         }
 
@@ -343,6 +351,9 @@ sm = {
             article.parentElement.removeChild(article);
           }
         }
+      })
+      .catch((error) => {
+        console.error("GET error", error);
       });
   },
   proxy_init: function () {
