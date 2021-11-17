@@ -2,7 +2,7 @@
 
 sm = {
   proxy: "//demo.httprelay.io/proxy/" + uid,
-  to: 10000,
+  to: 2048,
   users: 2,
   log: {
     c: { uid: uid, auth: {}, users: 0 },
@@ -48,14 +48,16 @@ sm = {
             // prune user
             if (branch.e.length <= 1 || sm.purge) {
               delete sm.log[user];
-              delete sm.log[cfg.uid].c.auth[user];
+              //delete cfg.auth[user];
             }
           } else if (access == "allow") {
             cfg.users += 1;
           }
+          
           cfg.auth[user] = access;
+
         }
-        // access user
+        // update access user, unless deny
         if (user == uid) {
           auth = cfg.auth[user];
         }
@@ -100,7 +102,6 @@ sm = {
             });
             return -wait;
           };
-
           let wait = auth == "deny" ? "Infinity" : queue();
           return { c: { time: wait, hint: -1 } };
         } else if (init) {
@@ -113,7 +114,9 @@ sm = {
 
       // push branch cfg to master
       Object.keys(log.c).forEach((meta) => {
-        branch.c[meta] = log.c[meta];
+        if (init || meta != "time") {
+          branch.c[meta] = log.c[meta];
+        }
       });
       // push branch events to master
       if (!init && uid !== cfg.uid) {
@@ -123,6 +126,8 @@ sm = {
       }
 
       // latency
+      // server: [...AIMD poll intervals] (revlists use -interval)
+      // client: compression factor
       let delta = (time - branch.c.time) / cfg.users;
       delta = Math.max(1 - delta / sm.to, 0).toFixed(3);
       // events: prune server old, sent client new
@@ -136,9 +141,10 @@ sm = {
           let u = (revlist[peer] = { c: user.c });
           let block = cfg.auth[peer] == "deny";
 
-          // peer init, round-trip events
+          // peers init, round-trip, events
           let pull_hard =
             branch.c.auth[peer] == "init" &&
+            branch.e[0].init === false &&
             user.e[0].init === false &&
             user.e.length > 1;
 
@@ -146,16 +152,16 @@ sm = {
             let event = user.e[i];
             // commits to revlist, unless own user
             if (uid != peer) {
-              let tip_push = event.time >= log.c.time - sm.to;
+              let tip_push = event.time >= branch.c.time - sm.to;
               let tip_pull = event.time >= user.c.time - sm.to;
               // auth new init local
-              let HEAD = (tip_push || tip_pull) && event.time <= log.c.time;
+              let HEAD = (tip_push || tip_pull) && event.time <= time;
               if ((HEAD && !block) || init || pull_hard) {
                 u[event.time] = event;
               }
             }
             // prune before HEAD (basic test)
-            if (event.time < log.c.time) {
+            if (event.time < branch.c.time) {
               for (let j = i - 1; j >= 0; j--) {
                 let eventPre = user.e[j];
                 if (event.id == eventPre.id && event.value == eventPre.value) {
@@ -172,7 +178,7 @@ sm = {
             //delete branch.c.auth[peer];
           }
           // peer init, handshake
-          if (init && !block && uid != peer) {
+          if (user.c.auth && !user.c.auth[uid] && !block && uid != peer) {
             user.c.auth[uid] = "init";
           }
 
@@ -190,13 +196,15 @@ sm = {
               users++;
             }
           }
-          
+          // client revlist doesn't use auth...?
+          //u.c.auth = {};
         }
         // async...?
       });
 
-      // real user count (not uac daemon)
+      // real meta (not uac daemon, pre-revlist)
       cfg.users = users;
+      branch.c.time = log.c.time;
 
       // server/user auth handshake
       if (init) {
@@ -252,7 +260,7 @@ sm = {
       }
     }
 
-    // route has 20-minute cache ( max 2048KB ~= 2MB )
+    // route has 20-minute cache ( max ~2048KB )
     params = encodeURIComponent(JSON.stringify(params));
     fetch(sm.proxy + "/log?log=" + params, {
       keepalive: true
@@ -264,6 +272,7 @@ sm = {
         return data ? JSON.parse(data) : {};
       })
       .then((revlist) => {
+        // max revlist: ~2048KB*users
         console.log("revlist", revlist);
         let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
         let revlogs = document.getElementById("revlist");
@@ -290,7 +299,6 @@ sm = {
         if (cfg.time != "Infinity") {
           sm.sto = setTimeout(function () {
             sm.GET(cfg);
-            // tried AIMD/throttle, but revlist uses -interval
           }, sm.to);
         }
 
@@ -308,9 +316,9 @@ sm = {
           let merge = revlist[key];
           let card = document.createElement("section");
           if (key == "c") {
-            if (!server && key.hint != -1) {
+            if (!server) {
               // pull revlist cfg unless server or error
-              //sm.log[key] = merge;
+              sm.log[key].hint = merge.hint;
             }
             card.style.backgroundColor = "#efefef";
           } else {
@@ -340,7 +348,7 @@ sm = {
           fragment.append(card);
         });
         toast.appendChild(fragment);
-        //toast.scrollIntoView();
+        toast.scrollIntoView();
 
         // revlist old remove
         let articles = revlogs.getElementsByTagName("article[data-time]");
