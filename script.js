@@ -1,5 +1,5 @@
 /*jshint esversion: 6 */
-
+//lucid.app/documents/embeddedchart/e19ef36e-5abb-40fe-95d9-84cd4e140947#
 sm = {
   proxy: "//demo.httprelay.io/proxy/" + uid,
   to: 2048,
@@ -114,7 +114,7 @@ sm = {
 
       // push branch cfg to master
       Object.keys(log.c).forEach((meta) => {
-        if (init || meta != "time") {
+        if (init || (meta != "time" && meta != "auth")) {
           branch.c[meta] = log.c[meta];
         }
       });
@@ -128,8 +128,8 @@ sm = {
       // latency
       // server: [...AIMD poll intervals] (revlists use -interval)
       // client: compression factor
-      let delta = (time - branch.c.time) / cfg.users;
-      delta = Math.max(1 - delta / sm.to, 0).toFixed(3);
+      let delta = (time - log.c.time)/sm.to;
+      delta = Math.max(1-delta,0).toFixed(3);
       // events: prune server old, sent client new
       let revlist = { c: { time: time, hint: delta } };
       let users = 0;
@@ -260,6 +260,7 @@ sm = {
       }
     }
 
+    console.log("params", params);
     // route has 20-minute cache ( max ~2048KB )
     params = encodeURIComponent(JSON.stringify(params));
     fetch(sm.proxy + "/log?log=" + params, {
