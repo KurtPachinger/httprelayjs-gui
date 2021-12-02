@@ -2,7 +2,7 @@
 //lucid.app/documents/embeddedchart/e19ef36e-5abb-40fe-95d9-84cd4e140947#
 sm = {
   proxy: "//demo.httprelay.io/proxy/" + uid,
-  to: 2048,
+  to: 2048 * 2,
   users: 2,
   log: {
     c: { uid: uid, auth: {}, users: 0 },
@@ -20,7 +20,7 @@ sm = {
       let log = JSON.parse(
         decodeURIComponent(ctx.request.url.searchParams.get("log"))
       );
-      //console.log("log",log)
+      console.log("log", log);
 
       // empty or malformed
       if (!log || !log.c.uid) {
@@ -53,9 +53,8 @@ sm = {
           } else if (access == "allow") {
             cfg.users += 1;
           }
-          
-          cfg.auth[user] = access;
 
+          cfg.auth[user] = access;
         }
         // update access user, unless deny
         if (user == uid) {
@@ -128,8 +127,8 @@ sm = {
       // latency
       // server: [...AIMD poll intervals] (revlists use -interval)
       // client: compression factor
-      let delta = (time - log.c.time)/sm.to;
-      delta = Math.max(1-delta,0).toFixed(3);
+      let delta = (time - log.c.time) / sm.to;
+      delta = Math.max(1 - delta, 0).toFixed(3);
       // events: prune server old, sent client new
       let revlist = { c: { time: time, hint: delta } };
       let users = 0;
@@ -143,7 +142,7 @@ sm = {
 
           // peers init, round-trip, events
           let pull_hard =
-            branch.c.auth[peer] == "init" &&
+            branch.c.auth[peer] === "init" &&
             branch.e[0].init === false &&
             user.e[0].init === false &&
             user.e.length > 1;
@@ -156,7 +155,7 @@ sm = {
               let tip_pull = event.time >= user.c.time - sm.to;
               // auth new init local
               let HEAD = (tip_push || tip_pull) && event.time <= time;
-              if ((HEAD && !block) || init || pull_hard) {
+              if ((HEAD && !block) || pull_hard) {// || init
                 u[event.time] = event;
               }
             }
@@ -450,17 +449,99 @@ sm = {
   },
   proxy_add: function (val, type) {
     if (type == "file") {
-      var file = val.files[0];
-      var reader = new FileReader();
-      reader.onloadend = function () {
-        console.log("FileReader:", reader.result);
-        sm.proxy_add(reader.result);
-      };
-      file && reader.readAsDataURL(file);
+      let files = val.files;
+      if (FileReader && files && files.length) {
+        for (let i = 0; i < files.length; i++) {
+          let file = files[i];
+          let fr = new FileReader();
+          fr.onload = function () {
+            let img = document.createElement("img");
+            img.onload = function () {
+              let canvas = sm.fileMax(img);
+              //let imgMax = document.createElement("img");
+              let compress = canvas.toDataURL("image/jpeg", 0.5);
+              // add
+              let en = sm.lzw.en(compress);
+              sm.proxy_add(en);
+            };
+            console.log("FileReader:", fr.result);
+            img.src = fr.result;
+          };
+          fr.readAsDataURL(file);
+        }
+      }
+
     } else if (!type) {
       sm.log[uid].e.push({ time: Date.now(), value: val, id: 123 });
     } else {
       sm.log[uid].c[type] = val;
+    }
+  },
+  fileMax: function (img) {
+    var MAX = 256;
+
+    var width = img.width;
+    var height = img.height;
+
+    // Change the resizing logic
+    if (width > height) {
+      if (width > MAX) {
+        height = height * (MAX / width);
+        width = MAX;
+      }
+    } else {
+      if (height > MAX) {
+        width = width * (MAX / height);
+        height = MAX;
+      }
+    }
+
+    var canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    var ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, width, height);
+
+    return canvas;
+  },
+  lzw: {
+    en: function (c) {
+      var x = "charCodeAt",
+        b,
+        e = {},
+        f = c.split(""),
+        d = [],
+        a = f[0],
+        g = 256;
+      for (b = 1; b < f.length; b++)
+        (c = f[b]),
+          null != e[a + c]
+            ? (a += c)
+            : (d.push(1 < a.length ? e[a] : a[x](0)),
+              (e[a + c] = g),
+              g++,
+              (a = c));
+      d.push(1 < a.length ? e[a] : a[x](0));
+      for (b = 0; b < d.length; b++) d[b] = String.fromCharCode(d[b]);
+      return d.join("");
+    },
+    de: function (b) {
+      let f, o;
+      var a,
+        e = {},
+        d = b.split(""),
+        c = (f = d[0]),
+        g = [c],
+        h = (o = 256);
+      for (b = 1; b < d.length; b++)
+        (a = d[b].charCodeAt(0)),
+          (a = h > a ? d[b] : e[a] ? e[a] : f + c),
+          g.push(a),
+          (c = a.charAt(0)),
+          (e[o] = f + c),
+          o++,
+          (f = a);
+      return g.join("");
     }
   }
 };
