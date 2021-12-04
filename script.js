@@ -111,27 +111,59 @@ sm = {
         }
       }
 
+      let events = branch.e;
+      // last fetch ( multi-part 0 ) minus one deviation
+      let tip_sort = branch.c.time - sm.to;
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].time < tip_sort) {
+          // index to sort multi-part timestamps
+          tip_sort = i;
+          break;
+        }
+      }
+
+      // push log events to master branch
+      if (!init && uid !== cfg.uid) {
+        for (let i = 0; i < log.e.length; i++) {
+          events.push(log.e[i]);
+        }
+      }
+
+      // sort events by time
+      function multipart(a, b) {
+        if ("init" in a || "init" in b) {
+          return 0;
+        } else {
+          if (a.time < b.time) return -1;
+          if (a.time > b.time) return 1;
+          return 0;
+        }
+      }
+      let sorted = events.slice(tip_sort).sort(multipart);
+      branch.e = events.slice(0, tip_sort).concat(sorted);
+
+      // multi-part early abort. should uac/daemon?
+      if (log.c.hint > 1) {
+        return { c: { time: "Infinity", hint: log.c.hint } };
+      }
+
       // push branch cfg to master
       Object.keys(log.c).forEach((meta) => {
         if (init || (meta != "time" && meta != "auth")) {
+          // && meta != hint ??
           branch.c[meta] = log.c[meta];
         }
       });
-      // push branch events to master
-      if (!init && uid !== cfg.uid) {
-        for (let i = 0; i < log.e.length; i++) {
-          branch.e.push(log.e[i]);
-        }
-      }
 
       // latency
       // server: [...AIMD poll intervals] (revlists use -interval)
       // client: compression factor
       let delta = (time - log.c.time) / sm.to;
-      delta = Math.max(1 - delta, 0).toFixed(3);
+      delta = branch.c.hint = Math.max(1 - delta, 0).toFixed(3);
       // events: prune server old, sent client new
       let revlist = { c: { time: time, hint: delta } };
       let users = 0;
+
       Object.keys(sm.log).forEach((peer) => {
         // node, peer, meta
         if (peer !== "c") {
@@ -149,13 +181,18 @@ sm = {
 
           for (let i = user.e.length - 1; i >= 0; i--) {
             let event = user.e[i];
+            //
+            // if(!pull_hard && event.time)
+            //
+
             // commits to revlist, unless own user
             if (uid != peer) {
               let tip_push = event.time >= branch.c.time - sm.to;
               let tip_pull = event.time >= user.c.time - sm.to;
               // auth new init local
               let HEAD = (tip_push || tip_pull) && event.time <= time;
-              if ((HEAD && !block) || pull_hard) {// || init
+              if ((HEAD && !block) || pull_hard) {
+                // || init
                 u[event.time] = event;
               }
             }
@@ -224,6 +261,7 @@ sm = {
   GET: function (cfg) {
     let branch = sm.log[uid];
     let last = branch.c.time;
+
     // local HEAD time per response hint
     branch.c.time =
       isFinite(cfg.time) && cfg.hint >= 0
@@ -238,131 +276,167 @@ sm = {
       auth.time = cfg.time;
     }
 
-    // push local cfg
-    Object.keys(branch.c).forEach(function (k) {
-      cfg[k] = branch.c[k];
-    });
+    // if URL parameter exceeds boundary, multi-part fetch (like FormData)
+    const body = function (boundary) {
+      // push local cfg
+      let params = { c: {}, e: [] };
+      Object.keys(branch.c).forEach(function (k) {
+        // multi-part cfg is minimal
+        if (boundary === 0 || k == "uid" || k == "time" || k == "hint") {
+          params.c[k] = branch.c[k];
+        }
+      });
+      // multi-part fetch returns revlist once
+      params.c.hint = boundary + 1;
+      return params;
+    };
+    let multi = [body(0)];
+    let part = multi[multi.length - 1];
 
-    // local user events since last GET
-    let params = { c: cfg, e: [] };
+    // proxy parameters
     if (auth.init) {
-      params.e.unshift(auth);
+      // uac daemon
+      part.e.unshift(auth);
     } else {
+      // local user events since last GET
       for (let i = branch.e.length - 1; i >= 0; i--) {
         let event = branch.e[i];
         if (event.time > last) {
+          if (JSON.stringify(part).length >= 20480) {
+            let boundary = multi.length;
+            part = multi[boundary] = body(boundary);
+          }
           // init sends false once more
-          params.e.unshift(event);
+          part.e.unshift(event);
         } else {
           break;
         }
       }
     }
 
-    console.log("params", params);
     // route has 20-minute cache ( max ~2048KB )
-    params = encodeURIComponent(JSON.stringify(params));
-    fetch(sm.proxy + "/log?log=" + params, {
-      keepalive: true
-    })
-      .then((response) => {
-        return response.text();
-      })
-      .then((data) => {
-        return data ? JSON.parse(data) : {};
-      })
-      .then((revlist) => {
-        // max revlist: ~2048KB*users
-        console.log("revlist", revlist);
-        let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
-        let revlogs = document.getElementById("revlist");
-        let toast = document.createElement("article");
-        revlogs.appendChild(toast);
 
-        // cfg callback: error handling
-        let status = "";
-        if (cfg.hint === -1) {
-          status += "access error";
-          if (cfg.time == "Infinity") {
-            //or 0?
-            status += ": expired";
-          } else if (cfg.time < 0) {
-            // -Infinity or -queue
-            status += ": max user" + cfg.time;
-          }
-          // undefined... reinit?
-        }
-        toast.innerText = status;
+    const RPS = 5;
+    for (let i = 0; i < multi.length; i++) {
+      // requests per second, distributed through 100ms
+      let toRPS = 1000 * Math.floor(i / RPS);
+      toRPS += (i / RPS) * 100;
 
-        // schedule GET
-        clearTimeout(sm.sto);
-        if (cfg.time != "Infinity") {
-          sm.sto = setTimeout(function () {
-            sm.GET(cfg);
-          }, sm.to);
-        }
-
-        // local logs
-        document.getElementById("local").innerText = JSON.stringify(
-          sm.log,
-          null,
-          2
-        );
-
-        // revlist cards
-        toast.setAttribute("data-time", cfg.time || 0);
-        let fragment = new DocumentFragment();
-        Object.keys(revlist).forEach(function (key) {
-          let merge = revlist[key];
-          let card = document.createElement("section");
-          if (key == "c") {
-            if (!server) {
-              // pull revlist cfg unless server or error
-              sm.log[key].hint = merge.hint;
+      setTimeout(() => {
+        console.log("multipart", multi[i]);
+        let part = encodeURIComponent(JSON.stringify(multi[i]));
+        fetch(sm.proxy + "/log?log=" + part, { keepalive: true })
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(response.status);
             }
-            card.style.backgroundColor = "#efefef";
-          } else {
-            // user style
-            let color = merge.color || (merge.c && merge.c.color) || "initial";
-            card.style.backgroundColor = color;
-            // text legible
-            color = color.replace("#", "").replace("initial", "FFFFFF");
-            color =
-              Number(color.charAt(0)) +
-              Number(color.charAt(2)) +
-              Number(color.charAt(4));
-            if (isFinite(color) && color <= 27) {
-              card.style.color = "#fff";
+            if (response.status === 401) {
+              console.log("restart server?");
             }
-            // latency
-            let hint = (90 * (merge.c && merge.c.hint)) | 0;
-            hint = "hsl(" + hint + ", 100%, 50%)";
-            card.style.boxShadow = "inset 0.25rem 0 " + hint;
-          }
-          // prettify
-          let string = JSON.stringify({ [key]: merge }, null, 2);
-          string = string.slice(1);
-          string = string.slice(0, -1);
-          card.innerText = string;
-          // output
-          fragment.append(card);
-        });
-        toast.appendChild(fragment);
-        toast.scrollIntoView();
+            return response.text();
+          })
+          .then((data) => {
+            return data ? JSON.parse(data) : {};
+          })
+          .then((revlist) => {
+            // max revlist: ~2048KB*users
+            console.log("revlist", revlist);
 
-        // revlist old remove
-        let articles = revlogs.getElementsByTagName("article[data-time]");
-        for (let i = articles.length - 1; i >= 0; i--) {
-          let article = articles[i];
-          let time = article.getAttribute("data-time");
-          if (Date.now() - time > sm.to * 20) {
-            article.parentElement.removeChild(article);
-          }
-        }
-      })
-      .catch((error) => {
-        console.error("GET error", error);
-      });
+            let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
+            let revlogs = document.getElementById("revlist");
+            let toast = document.createElement("article");
+            revlogs.appendChild(toast);
+
+            // cfg callback: error handling
+            let status = "";
+            if (cfg.hint === -1) {
+              status += "access error";
+              if (cfg.time == "Infinity") {
+                //or 0?
+                status += ": expired";
+              } else if (cfg.time < 0) {
+                // -Infinity or -queue
+                status += ": max user" + cfg.time;
+              }
+              // undefined... reinit?
+            } else if (cfg.hint > 1 && cfg.time == "Infinity") {
+              toast.innerText = "multi-part: " + cfg.hint;
+              return;
+            }
+            toast.innerText = status;
+
+            // schedule GET
+            clearTimeout(sm.sto);
+            if (cfg.time != "Infinity") {
+              sm.sto = setTimeout(function () {
+                sm.GET(cfg);
+              }, sm.to);
+            }
+
+            // local logs
+            document.getElementById("local").innerText = JSON.stringify(
+              sm.log,
+              null,
+              2
+            );
+
+            // revlist cards
+            toast.setAttribute("data-time", cfg.time || 0);
+            let fragment = new DocumentFragment();
+            Object.keys(revlist).forEach(function (key) {
+              let merge = revlist[key];
+              let card = document.createElement("section");
+              if (key == "c") {
+                if (!server) {
+                  // pull revlist cfg unless server or error
+                  sm.log[key].hint = merge.hint;
+                }
+                card.style.backgroundColor = "#efefef";
+              } else {
+                // user style
+                let color =
+                  merge.color || (merge.c && merge.c.color) || "initial";
+                card.style.backgroundColor = color;
+                // text legible
+                color = color.replace("#", "").replace("initial", "FFFFFF");
+                color =
+                  Number(color.charAt(0)) +
+                  Number(color.charAt(2)) +
+                  Number(color.charAt(4));
+                if (isFinite(color) && color <= 27) {
+                  card.style.color = "#fff";
+                }
+                // latency
+                let hint = (90 * (merge.c && merge.c.hint)) | 0;
+                hint = "hsl(" + hint + ", 100%, 50%)";
+                card.style.boxShadow = "inset 0.25rem 0 " + hint;
+              }
+              // prettify
+              let string = JSON.stringify({ [key]: merge }, null, 2);
+              string = string.slice(1);
+              string = string.slice(0, -1);
+              card.innerText = string;
+              // output
+              fragment.append(card);
+            });
+            toast.appendChild(fragment);
+            toast.scrollIntoView();
+
+            // revlist old remove
+            let articles = revlogs.querySelectorAll("article[data-time]");
+            for (let i = articles.length - 1; i >= 0; i--) {
+              let article = articles[i];
+              let time = article.getAttribute("data-time");
+              if (Date.now() - time > sm.to * 20) {
+                article.parentElement.removeChild(article);
+              }
+            }
+          })
+          .catch((error) => {
+            console.error("GET error", error);
+          });
+      }, toRPS);
+    }
   },
   proxy_init: function () {
     // share links
@@ -447,7 +521,7 @@ sm = {
       }
     }
   },
-  proxy_add: function (val, type) {
+  proxy_add: function (val, type, id = 123) {
     if (type == "file") {
       let files = val.files;
       if (FileReader && files && files.length) {
@@ -462,7 +536,7 @@ sm = {
               let compress = canvas.toDataURL("image/jpeg", 0.5);
               // add
               let en = sm.lzw.en(compress);
-              sm.proxy_add(en);
+              sm.proxy_add(en, false, encodeURI(file.name));
             };
             console.log("FileReader:", fr.result);
             img.src = fr.result;
@@ -470,9 +544,8 @@ sm = {
           fr.readAsDataURL(file);
         }
       }
-
     } else if (!type) {
-      sm.log[uid].e.push({ time: Date.now(), value: val, id: 123 });
+      sm.log[uid].e.push({ time: Date.now(), value: val, id: id });
     } else {
       sm.log[uid].c[type] = val;
     }
