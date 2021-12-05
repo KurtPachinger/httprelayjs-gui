@@ -2,11 +2,10 @@
 //lucid.app/documents/embeddedchart/e19ef36e-5abb-40fe-95d9-84cd4e140947#
 const uid = Date.now();
 const server = location.host.indexOf("httprelay") === -1;
-console.log(window.location);
 
 let sm = {
   proxy_url: "//demo.httprelay.io/proxy/" + uid,
-  to: 2048 * 2,
+  to: 2048,
   users: 2,
   log: {
     c: { uid: uid, auth: {}, users: 0 },
@@ -248,6 +247,10 @@ let sm = {
         log.e[0].init = false;
       }
 
+      let large = JSON.stringify(revlist).length;
+      if (large > 20480 * 10) {
+        console.error("LARGE", revlist);
+      }
       return revlist;
     });
   },
@@ -307,14 +310,10 @@ let sm = {
       }
     }
 
-    // route has 20-minute cache ( max ~2048KB )
+    // route has 20-minute cache ( max ~2048KB * 10 per second )
     let revlogs = document.getElementById("revlist");
-    const RPS = 5;
     for (let i = 0; i < multi.length; i++) {
-      // requests per second, distributed through 100ms
-      let toRPS = 1000 * Math.floor(i / RPS);
-      toRPS += (i / RPS) * 100;
-
+      let RPS = i * 200;
       setTimeout(() => {
         console.log("multipart", multi[i]);
         let toast = document.createElement("article");
@@ -322,19 +321,23 @@ let sm = {
         let part = encodeURIComponent(JSON.stringify(multi[i]));
         fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true })
           .then((response) => {
-
-            if (!response.ok || response.status === 401) {
+            if (!response.ok || response.status !== 200) {
+              // == 400
               // error, reconnect?
-              document.getElementById("client").disabled = false;
-              status = "server error: " + response.status;
+              status = response.status;
               throw new Error(response.status);
             }
 
             return response.text();
           })
-          .then((data) => {
-            //return data ? JSON.parse(data) : {};
-            return JSON.parse(data);
+          .then((res) => {
+            // JSON, not JSON, or nothing?
+            try {
+              res = JSON.parse(res);
+            } catch {
+              res = res;
+            }
+            return res;
           })
           .then((revlist) => {
             // max revlist: ~2048KB*users
@@ -425,16 +428,24 @@ let sm = {
             }
           })
           .catch((error) => {
-            console.error("GET error", error);
+            status = status || -1;
+            //error.message == "Failed to fetch"
+            console.error("revlist", error);
           })
           .finally(() => {
+            // server error: status (-1, 401)
+            if (typeof status == "number") {
+              status = "serve error: " + status;
+              document.getElementById("client").disabled = false;
+              clearTimeout(sm.sto);
+            }
             // output toast ui
             toast.setAttribute("data-time", Date.now());
             toast.prepend(status);
             revlogs.appendChild(toast);
             toast.scrollIntoView();
           });
-      }, toRPS);
+      }, RPS);
     }
   },
   proxy_init: function () {
@@ -464,7 +475,7 @@ let sm = {
       serverId.textContent = "const serverId = " + sm.log.c.uid;
       let js = document.createElement("script");
       js.src = "//codepen.io/kpachinger/pen/VwzmKJV.js";
-      
+
       sm.proxy.routes.addGet("/page", "page", () => {
         // route clients to landing page
         let doc = document.implementation.createHTMLDocument(
@@ -477,6 +488,15 @@ let sm = {
       });
 
       sm.proxy.start();
+
+      // poll abort/retry
+      setInterval(function () {
+        if ((sm.proxy.errRetry + 1) % 4 === 0) {
+          sm.proxy.stop();
+          document.getElementById("server").disabled = false;
+        }
+      }, 15000);
+      //
     }
 
     // click events
@@ -499,6 +519,13 @@ let sm = {
       if (id == "server" || id == "client") {
         target.disabled = true;
         if (id == "server") {
+          if (sm.proxy.abortSig.aborted) {
+            sm.proxy.abortCtrl = new AbortController();
+            sm.proxy.abortSig = sm.proxy.abortCtrl.signal;
+            sm.proxy.start();
+            return;
+          }
+
           // route client event logs
           sm.SERVE();
           document.getElementById("client").disabled = false;
@@ -540,7 +567,7 @@ let sm = {
 
             if (!server && user.e[0].init != true) {
               // attempt reconnect with convoluted uid
-              user.c.uid += "r";
+              user.c.uid += "c";
               user.e[0].init = true;
               user.c.time = "-Infinity";
             }
@@ -670,7 +697,6 @@ if (server) {
   };
   document.head.appendChild(script);
 } else {
-  console.log("CLIENT");
   // client: load proxy & GET
   sm.log.c.uid = serverId;
   sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
