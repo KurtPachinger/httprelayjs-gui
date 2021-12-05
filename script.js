@@ -1,7 +1,11 @@
 /*jshint esversion: 6 */
 //lucid.app/documents/embeddedchart/e19ef36e-5abb-40fe-95d9-84cd4e140947#
-sm = {
-  proxy: "//demo.httprelay.io/proxy/" + uid,
+const uid = Date.now();
+const server = location.host.indexOf("httprelay") === -1;
+console.log(window.location);
+
+let sm = {
+  proxy_url: "//demo.httprelay.io/proxy/" + uid,
   to: 2048 * 2,
   users: 2,
   log: {
@@ -13,17 +17,13 @@ sm = {
   },
   SERVE: function () {
     // merge push with master, prune master, return revlist
-    const proxy = new HttpRelay(new URL("https://demo.httprelay.io")).proxy(
-      sm.log.c.uid
-    );
-    proxy.routes.addGet("/log", "log", (ctx) => {
-      let log = JSON.parse(
-        decodeURIComponent(ctx.request.url.searchParams.get("log"))
-      );
+    sm.proxy.routes.addGet("/log", "log", (ctx) => {
+      let params = ctx.request.url.searchParams.get("log") || "{}";
+      let log = JSON.parse(decodeURIComponent(params));
       console.log("log", log);
 
       // empty or malformed
-      if (!log || !log.c.uid) {
+      if (!log || !log.c || !log.c.uid) {
         return {};
       }
 
@@ -227,7 +227,8 @@ sm = {
             const is_unload = user.c.time == Infinity || (!active && !recent);
             if (is_unload) {
               // user access
-              daemon("deny", peer);
+              // deny peer or user.c.uid
+              daemon("deny", user.c.uid);
             } else {
               users++;
             }
@@ -249,14 +250,6 @@ sm = {
 
       return revlist;
     });
-
-    proxy.assets.addFetch("//codepen.io/kpachinger/pen/VwzmKJV.html", {
-      name: "page",
-      interpolate: true,
-      mount: true
-    });
-
-    proxy.start();
   },
   GET: function (cfg) {
     let branch = sm.log[uid];
@@ -315,7 +308,7 @@ sm = {
     }
 
     // route has 20-minute cache ( max ~2048KB )
-
+    let revlogs = document.getElementById("revlist");
     const RPS = 5;
     for (let i = 0; i < multi.length; i++) {
       // requests per second, distributed through 100ms
@@ -324,48 +317,49 @@ sm = {
 
       setTimeout(() => {
         console.log("multipart", multi[i]);
+        let toast = document.createElement("article");
+        let status = "";
         let part = encodeURIComponent(JSON.stringify(multi[i]));
-        fetch(sm.proxy + "/log?log=" + part, { keepalive: true })
+        fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true })
           .then((response) => {
-            if (!response.ok) {
+
+            if (!response.ok || response.status === 401) {
+              // error, reconnect?
+              document.getElementById("client").disabled = false;
+              status = "server error: " + response.status;
               throw new Error(response.status);
             }
-            if (response.status === 401) {
-              console.log("restart server?");
-            }
+
             return response.text();
           })
           .then((data) => {
-            return data ? JSON.parse(data) : {};
+            //return data ? JSON.parse(data) : {};
+            return JSON.parse(data);
           })
           .then((revlist) => {
             // max revlist: ~2048KB*users
             console.log("revlist", revlist);
 
             let cfg = revlist && revlist.c ? revlist.c : { hint: -1 };
-            let revlogs = document.getElementById("revlist");
-            let toast = document.createElement("article");
-            revlogs.appendChild(toast);
 
-            // cfg callback: error handling
-            let status = "";
+            // cfg callback: uac daemon
             if (cfg.hint === -1) {
               status += "access error";
               if (cfg.time == "Infinity") {
-                //or 0?
+                // uid blocked, reconnect?
+                document.getElementById("client").disabled = false;
                 status += ": expired";
               } else if (cfg.time < 0) {
                 // -Infinity or -queue
                 status += ": max user" + cfg.time;
               }
-              // undefined... reinit?
+              // undefined... reconnect?
             } else if (cfg.hint > 1 && cfg.time == "Infinity") {
-              toast.innerText = "multi-part: " + cfg.hint;
+              status = "multi-part: " + cfg.hint;
               return;
             }
-            toast.innerText = status;
 
-            // schedule GET
+            // reconnect loop
             clearTimeout(sm.sto);
             if (cfg.time != "Infinity") {
               sm.sto = setTimeout(function () {
@@ -381,7 +375,6 @@ sm = {
             );
 
             // revlist cards
-            toast.setAttribute("data-time", cfg.time || 0);
             let fragment = new DocumentFragment();
             Object.keys(revlist).forEach(function (key) {
               let merge = revlist[key];
@@ -419,8 +412,7 @@ sm = {
               // output
               fragment.append(card);
             });
-            toast.appendChild(fragment);
-            toast.scrollIntoView();
+            toast.append(fragment);
 
             // revlist old remove
             let articles = revlogs.querySelectorAll("article[data-time]");
@@ -434,21 +426,59 @@ sm = {
           })
           .catch((error) => {
             console.error("GET error", error);
+          })
+          .finally(() => {
+            // output toast ui
+            toast.setAttribute("data-time", Date.now());
+            toast.prepend(status);
+            revlogs.appendChild(toast);
+            toast.scrollIntoView();
           });
       }, toRPS);
     }
   },
   proxy_init: function () {
+    // proto template served to client
+    let template = document.getElementById("template").cloneNode(true);
+
+    // proxy role
+    let role = server ? "server" : "client";
+    document.getElementById(role).disabled = false;
+
     // share links
-    document.querySelector("section.hide").classList.remove("hide");
-    document.getElementById("logLink").setAttribute("href", sm.proxy + "/log");
+    document.getElementById("logs").classList.remove("hide");
+    document
+      .getElementById("logLink")
+      .setAttribute("href", sm.proxy_url + "/log");
     document
       .getElementById("pageLink")
-      .setAttribute("href", sm.proxy + "/page");
+      .setAttribute("href", sm.proxy_url + "/page");
 
-    // proxy click type
-    let proxy = server ? "server" : "client";
-    document.getElementById(proxy).disabled = false;
+    if (server) {
+      // create name server
+      sm.proxy = new HttpRelay(new URL("https://demo.httprelay.io")).proxy(
+        sm.log.c.uid
+      );
+      // dependency
+      let serverId = document.createElement("script");
+      serverId.textContent = "const serverId = " + sm.log.c.uid;
+      let js = document.createElement("script");
+      js.src = "//codepen.io/kpachinger/pen/VwzmKJV.js";
+      
+      sm.proxy.routes.addGet("/page", "page", () => {
+        // route clients to landing page
+        let doc = document.implementation.createHTMLDocument(
+          "HTTPRelay-js Client"
+        );
+        doc.head.appendChild(serverId);
+        doc.body.appendChild(template);
+        doc.body.appendChild(js);
+        return doc;
+      });
+
+      sm.proxy.start();
+    }
+
     // click events
     let ui = document.querySelectorAll("fieldset [id]");
     for (let i = ui.length - 1; i >= 0; i--) {
@@ -469,9 +499,10 @@ sm = {
       if (id == "server" || id == "client") {
         target.disabled = true;
         if (id == "server") {
+          // route client event logs
           sm.SERVE();
           document.getElementById("client").disabled = false;
-          document.querySelector("#sessions").classList.remove("hide");
+          document.getElementById("sessions").classList.remove("hide");
         } else {
           // vanity username
           let user = sm.log[uid];
@@ -499,10 +530,21 @@ sm = {
           }
 
           // init event and GET loop
-          user.e.unshift({
-            time: Date.now(),
-            init: true
-          });
+          if (!user.e.length) {
+            user.e.unshift({
+              time: Date.now(),
+              init: true
+            });
+          } else {
+            // button re-enabled (no server, timeout...)
+
+            if (!server && user.e[0].init != true) {
+              // attempt reconnect with convoluted uid
+              user.c.uid += "r";
+              user.e[0].init = true;
+              user.c.time = "-Infinity";
+            }
+          }
           sm.GET({ time: "-Infinity" });
         }
       } else {
@@ -627,4 +669,17 @@ if (server) {
     sm.proxy_init();
   };
   document.head.appendChild(script);
+} else {
+  console.log("CLIENT");
+  // client: load proxy & GET
+  sm.log.c.uid = serverId;
+  sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
+  sm.proxy_init();
+  window.onbeforeunload = function () {
+    // unload stricter
+    sm.log[uid].c.time = "Infinity";
+    sm.GET({
+      time: "Infinity"
+    });
+  };
 }
