@@ -130,19 +130,7 @@ let sm = {
           if (event.id && event.id.indexOf("i__") === 0) {
             let de = sm.lzw.de(event.value);
             // route image
-            let file = sm.img(de, event.id);
-            let link = document.createElement("a");
-            link.href = sm.proxy_url + "/download/" + event.id;
-            link.append(file);
-            document.getElementById("images").append(link);
-
-            // thumbnail
-            let compress = sm.img(file, 0.125);
-            
-            
-            console.log("compress",compress);
-            let en = sm.lzw.en(compress);
-            event.value = en;
+            event.value = sm.img(de, event.id, { serve: true, pass: 0.125 });
           }
           if (uid !== cfg.uid) {
             events.push(event);
@@ -275,7 +263,6 @@ let sm = {
       }
       return revlist;
     });
-
   },
   GET: function (cfg) {
     let branch = sm.log[uid];
@@ -510,27 +497,30 @@ let sm = {
         doc.body.appendChild(js);
         return doc;
       });
-      
+
       sm.proxy.routes.addGet("/download/:id", "download", (ctx) => {
         // route downloads
-        let img = document.getElementById(ctx.routeParams[0]);
-        let blob = new Blob([img], {type:"image/jpeg"})
+        //let img = document.getElementById(ctx.routeParams[0]);
+        //let blob = new Blob([img], {type:"image/jpeg"})
         return ctx.respond({
-          //body: document.getElementById(ctx.routeParams[0]),
-          body: blob,
+          body: document.getElementById(ctx.routeParams[0])["file"],
+          //body: blob,
           download: true
         });
       });
 
       sm.proxy.start();
 
-      // poll abort/retry
       setInterval(function () {
+        // poll abort/retry
         let err = sm.proxy.errRetry;
         if (err > 0 && err % 4 == 0) {
+          // lost internet
           console.error("error");
           sm.proxy.stop();
           document.getElementById("server").disabled = false;
+        } else {
+          // if no response, second proxy?
         }
       }, 15000);
       //
@@ -634,20 +624,10 @@ let sm = {
         for (let i = 0; i < files.length; i++) {
           let file = files[i];
           let fr = new FileReader();
-
           fr.onload = function () {
-            let img = document.createElement("img");
-            img.onload = function () {
-              //file.type
-              let compress = sm.img(img);
-              console.log(file.name, fr.result, compress);
-              // add
-              let en = sm.lzw.en(compress);
-              let idReg = /[^A-Za-z0-9_-]/g;
-              let idName = "i__" + file.name.replace(idReg, "__");
-              sm.proxy_add(en, false, idName);
-            };
-            img.src = fr.result;
+            let tokenReg = /[^A-Za-z0-9_-]/g;
+            let token = "i__" + file.name.replace(tokenReg, "__");
+            sm.img(fr.result, token);
           };
           fr.readAsDataURL(file);
         }
@@ -658,41 +638,76 @@ let sm = {
       sm.log[uid].c[type] = val;
     }
   },
-  img: function (img, token = 0.5, type = "image/jpeg") {
-    if (typeof token === "string") {
-      console.log("hh");
-      // base64 to file
-      let file = document.createElement("img");
-      file.src = img;
-      file.id = token;
-      return file;
-    }
+  img: function (img, token, opts = {}) {
+    console.log(img, token, opts);
+    let type = opts.type || "image/jpeg";
+    let pass = opts.pass || 0.5;
 
-    let MAX = 512 * token;
-    var width = img.width;
-    var height = img.height;
+    // load image source
+    let output = {};
+    let image = document.createElement("img");
+    image.id = token;
+    image.onload = function () {
+      convert();
+    };
+    image.src = img;
 
-    // Change the resizing logic
-    if (width > height) {
-      if (width > MAX) {
-        height = height * (MAX / width);
-        width = MAX;
+    function convert() {
+      // thumbnail pass
+      let MAX = 512 * pass;
+      var width = image.width;
+      var height = image.height;
+      if (width > height) {
+        if (width > MAX) {
+          height = height * (MAX / width);
+          width = MAX;
+        }
+      } else {
+        if (height > MAX) {
+          width = width * (MAX / height);
+          height = MAX;
+        }
       }
-    } else {
-      if (height > MAX) {
-        width = width * (MAX / height);
-        height = MAX;
+      // thumb resize
+      var canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      var ctx = canvas.getContext("2d");
+      ctx.drawImage(image, 0, 0, width, height);
+      // thumb base64
+      output.thumb = canvas.toDataURL(type, pass);
+
+      let en = sm.lzw.en(output.thumb);
+
+      if (opts.serve) {
+        // route file download
+        async function dataUrlToFile() {
+          // create
+          const res = await fetch(img);
+          const blob = await res.blob();
+          let ext = token.lastIndexOf("__");
+          ext = token + token.substr(ext).replace("__", ".");
+          output.file = new File([blob], ext, { type: type });
+
+          // append
+          image["file"] = output.file;
+          let link = document.createElement("a");
+          link.href = sm.proxy_url + "/download/" + token;
+          link.target = "_blank";
+          link.append(image);
+          document.getElementById("images").append(link);
+
+          return;
+        }
+        dataUrlToFile();
+        // serve thumbnail and file
+      } else {
+        // client compress and send
+        sm.proxy_add(en, false, token);
       }
+
+      return en;
     }
-
-    var canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    var ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, width, height);
-
-    let compress = canvas.toDataURL("image/jpeg", 0.5);
-    return compress;
   },
   lzw: {
     en: function (c) {
