@@ -5,7 +5,7 @@ const server = location.host.indexOf("httprelay") === -1;
 
 let sm = {
   proxy_url: "//demo.httprelay.io/proxy/" + uid,
-  to: 2048,
+  to: 2048 * 4,
   users: 2,
   log: {
     c: { uid: uid, auth: {}, users: 0 },
@@ -122,9 +122,31 @@ let sm = {
       }
 
       // push log events to master branch
-      if (!init && uid !== cfg.uid) {
+      if (!init) {
         for (let i = 0; i < log.e.length; i++) {
-          events.push(log.e[i]);
+          let event = log.e[i];
+          // image share route and thumbnail
+          console.log(event);
+          if (event.id && event.id.indexOf("i__") === 0) {
+            let de = sm.lzw.de(event.value);
+            // route image
+            let file = sm.img(de, event.id);
+            let link = document.createElement("a");
+            link.href = sm.proxy_url + "/download/" + event.id;
+            link.append(file);
+            document.getElementById("images").append(link);
+
+            // thumbnail
+            let compress = sm.img(file, 0.125);
+            
+            
+            console.log("compress",compress);
+            let en = sm.lzw.en(compress);
+            event.value = en;
+          }
+          if (uid !== cfg.uid) {
+            events.push(event);
+          }
         }
       }
 
@@ -165,7 +187,7 @@ let sm = {
 
       Object.keys(sm.log).forEach((peer) => {
         // node, peer, meta
-        if (peer !== "c") {
+        if (peer !== "c" && peer != uid) {
           //console.log("master key", key);
           let user = sm.log[peer];
           let u = (revlist[peer] = { c: user.c });
@@ -247,12 +269,13 @@ let sm = {
         log.e[0].init = false;
       }
 
-      let large = JSON.stringify(revlist).length;
-      if (large > 20480 * 10) {
-        console.error("LARGE", revlist);
+      let large = new Blob([JSON.stringify(revlist)]).size;
+      if (large >= 19200) {
+        console.error("LARGE", revlist, large);
       }
       return revlist;
     });
+
   },
   GET: function (cfg) {
     let branch = sm.log[uid];
@@ -467,6 +490,7 @@ let sm = {
 
     if (server) {
       // create name server
+      // note: multiple servers prevents fetch response
       sm.proxy = new HttpRelay(new URL("https://demo.httprelay.io")).proxy(
         sm.log.c.uid
       );
@@ -486,12 +510,25 @@ let sm = {
         doc.body.appendChild(js);
         return doc;
       });
+      
+      sm.proxy.routes.addGet("/download/:id", "download", (ctx) => {
+        // route downloads
+        let img = document.getElementById(ctx.routeParams[0]);
+        let blob = new Blob([img], {type:"image/jpeg"})
+        return ctx.respond({
+          //body: document.getElementById(ctx.routeParams[0]),
+          body: blob,
+          download: true
+        });
+      });
 
       sm.proxy.start();
 
       // poll abort/retry
       setInterval(function () {
-        if ((sm.proxy.errRetry + 1) % 4 === 0) {
+        let err = sm.proxy.errRetry;
+        if (err > 0 && err % 4 == 0) {
+          console.error("error");
           sm.proxy.stop();
           document.getElementById("server").disabled = false;
         }
@@ -597,17 +634,19 @@ let sm = {
         for (let i = 0; i < files.length; i++) {
           let file = files[i];
           let fr = new FileReader();
+
           fr.onload = function () {
             let img = document.createElement("img");
             img.onload = function () {
-              let canvas = sm.fileMax(img);
-              //let imgMax = document.createElement("img");
-              let compress = canvas.toDataURL("image/jpeg", 0.5);
+              //file.type
+              let compress = sm.img(img);
+              console.log(file.name, fr.result, compress);
               // add
               let en = sm.lzw.en(compress);
-              sm.proxy_add(en, false, encodeURI(file.name));
+              let idReg = /[^A-Za-z0-9_-]/g;
+              let idName = "i__" + file.name.replace(idReg, "__");
+              sm.proxy_add(en, false, idName);
             };
-            console.log("FileReader:", fr.result);
             img.src = fr.result;
           };
           fr.readAsDataURL(file);
@@ -619,9 +658,17 @@ let sm = {
       sm.log[uid].c[type] = val;
     }
   },
-  fileMax: function (img) {
-    var MAX = 256;
+  img: function (img, token = 0.5, type = "image/jpeg") {
+    if (typeof token === "string") {
+      console.log("hh");
+      // base64 to file
+      let file = document.createElement("img");
+      file.src = img;
+      file.id = token;
+      return file;
+    }
 
+    let MAX = 512 * token;
     var width = img.width;
     var height = img.height;
 
@@ -644,7 +691,8 @@ let sm = {
     var ctx = canvas.getContext("2d");
     ctx.drawImage(img, 0, 0, width, height);
 
-    return canvas;
+    let compress = canvas.toDataURL("image/jpeg", 0.5);
+    return compress;
   },
   lzw: {
     en: function (c) {
