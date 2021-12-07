@@ -5,8 +5,8 @@ const server = location.host.indexOf("httprelay") === -1;
 
 let sm = {
   proxy_url: "//demo.httprelay.io/proxy/" + uid,
-  to: 2048 * 4,
-  users: 2,
+  to: 2048 * 2,
+  users: 6,
   log: {
     c: { uid: uid, auth: {}, users: 0 },
     [uid]: {
@@ -126,11 +126,10 @@ let sm = {
         for (let i = 0; i < log.e.length; i++) {
           let event = log.e[i];
           // image share route and thumbnail
-          console.log(event);
           if (event.id && event.id.indexOf("i__") === 0) {
             let de = sm.lzw.de(event.value);
-            // route image
-            event.value = sm.img(de, event.id, { serve: true, pass: 0.125 });
+            // serve route image
+            sm.img(de, event.id, { serve: event, pass: (1/32) });
           }
           if (uid !== cfg.uid) {
             events.push(event);
@@ -331,6 +330,7 @@ let sm = {
         let part = encodeURIComponent(JSON.stringify(multi[i]));
         fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true })
           .then((response) => {
+            // response > 19200 may be truncated
             if (!response.ok || response.status !== 200) {
               // == 400
               // error, reconnect?
@@ -512,15 +512,15 @@ let sm = {
       sm.proxy.start();
 
       setInterval(function () {
-        // poll abort/retry
+        // poll to maintain server
         let err = sm.proxy.errRetry;
         if (err > 0 && err % 4 == 0) {
-          // lost internet
+          // interrupt: lost internet, browser asleep...
           console.error("error");
           sm.proxy.stop();
           document.getElementById("server").disabled = false;
         } else {
-          // if no response, second proxy?
+          // silent interrupt: fetch error, second server...
         }
       }, 15000);
       //
@@ -639,9 +639,8 @@ let sm = {
     }
   },
   img: function (img, token, opts = {}) {
-    console.log(img, token, opts);
     let type = opts.type || "image/jpeg";
-    let pass = opts.pass || 0.5;
+    let pass = opts.pass || (1/2);
 
     // load image source
     let output = {};
@@ -680,6 +679,8 @@ let sm = {
       let en = sm.lzw.en(output.thumb);
 
       if (opts.serve) {
+        // crunch thumbnail for revlist
+        opts.serve.value = en;
         // route file download
         async function dataUrlToFile() {
           // create
@@ -706,7 +707,7 @@ let sm = {
         sm.proxy_add(en, false, token);
       }
 
-      return en;
+      return output;
     }
   },
   lzw: {
