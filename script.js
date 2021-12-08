@@ -129,7 +129,7 @@ let sm = {
           if (event.id && event.id.indexOf("i__") === 0) {
             let de = sm.lzw.de(event.value);
             // serve route image
-            sm.img(de, event.id, { serve: event, pass: 1 / 32 });
+            sm.img(de, event.id, { serve: event, pass: 1 / 64 });
           }
           if (uid !== cfg.uid) {
             events.push(event);
@@ -651,7 +651,7 @@ let sm = {
     };
     image.src = img;
 
-    const convert = function() {
+    const convert = function () {
       // pass max dimensions
       let MAX = 512 * pass;
       let width = image.width;
@@ -699,7 +699,7 @@ let sm = {
           }
         }
       }
-      
+
       // transfer minimum
       let en = sm.lzw.en(file || output.thumb);
 
@@ -708,11 +708,13 @@ let sm = {
         opts.serve.value = en;
         // route file download
         async function dataUrlToFile() {
+          type = img.slice(img.indexOf("image/"), img.indexOf(";base64"));
           // create
           const res = await fetch(img);
           const blob = await res.blob();
           let ext = token.lastIndexOf("__");
-          ext = token + token.substr(ext).replace("__", ".");
+          //type.slice(type.indexOf("/")+1)
+          ext = token.slice(0, ext) + "." + type.slice(type.indexOf("/") + 1);
           output.file = new File([blob], ext, { type: type });
 
           // append
@@ -733,7 +735,7 @@ let sm = {
       }
 
       return output;
-    }
+    };
   },
   lzw: {
     en: function (c) {
