@@ -129,7 +129,7 @@ let sm = {
           if (event.id && event.id.indexOf("i__") === 0) {
             let de = sm.lzw.de(event.value);
             // serve route image
-            sm.img(de, event.id, { serve: event, pass: (1/32) });
+            sm.img(de, event.id, { serve: event, pass: 1 / 32 });
           }
           if (uid !== cfg.uid) {
             events.push(event);
@@ -256,7 +256,7 @@ let sm = {
         log.e[0].init = false;
       }
 
-      let large = new Blob([JSON.stringify(revlist)]).size;
+      let large = JSON.stringify(revlist).length;
       if (large >= 19200) {
         console.error("LARGE", revlist, large);
       }
@@ -627,7 +627,7 @@ let sm = {
           fr.onload = function () {
             let tokenReg = /[^A-Za-z0-9_-]/g;
             let token = "i__" + file.name.replace(tokenReg, "__");
-            sm.img(fr.result, token);
+            sm.img(fr.result, token, { type: file.type });
           };
           fr.readAsDataURL(file);
         }
@@ -640,7 +640,7 @@ let sm = {
   },
   img: function (img, token, opts = {}) {
     let type = opts.type || "image/jpeg";
-    let pass = opts.pass || (1/2);
+    let pass = opts.pass || 1 / 2;
 
     // load image source
     let output = {};
@@ -651,11 +651,11 @@ let sm = {
     };
     image.src = img;
 
-    function convert() {
-      // thumbnail pass
+    const convert = function() {
+      // pass max dimensions
       let MAX = 512 * pass;
-      var width = image.width;
-      var height = image.height;
+      let width = image.width;
+      let height = image.height;
       if (width > height) {
         if (width > MAX) {
           height = height * (MAX / width);
@@ -667,16 +667,41 @@ let sm = {
           height = MAX;
         }
       }
-      // thumb resize
-      var canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      var ctx = canvas.getContext("2d");
-      ctx.drawImage(image, 0, 0, width, height);
-      // thumb base64
-      output.thumb = canvas.toDataURL(type, pass);
 
-      let en = sm.lzw.en(output.thumb);
+      let canvas = document.createElement("canvas");
+      let ctx = canvas.getContext("2d");
+      const resize = function (type, inc) {
+        // thumbnail resize and base64
+        canvas.width = width * inc;
+        canvas.height = height * inc;
+        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL(type, inc);
+      };
+
+      // reduce source to max
+      output.thumb = resize(type, 1);
+      // reduce output to min
+      let file,
+        inc = 0.1;
+      let types = ["image/jpeg", "image/png", "image/webp"];
+      for (let i = 0; i < types.length; i++) {
+        let type = types[i];
+        for (let j = 1; j >= 0; j -= inc) {
+          // increment (dimensions/quality) until within max filesize
+          let thumb = resize(type, j);
+          if (thumb.length <= 9_600) {
+            // use additional iteration if > 50% reduction
+            let thumberer = resize(type, j - inc);
+            thumb = thumberer.length / thumb.length < 0.5 ? thumberer : thumb;
+            // use minimum size file of types
+            file = thumb.length < output.thumb.length ? thumb : file;
+            break;
+          }
+        }
+      }
+      
+      // transfer minimum
+      let en = sm.lzw.en(file || output.thumb);
 
       if (opts.serve) {
         // crunch thumbnail for revlist
