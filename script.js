@@ -102,7 +102,7 @@ let sm = {
           };
           let wait = auth == "deny" ? "Infinity" : queue();
           return { c: { time: wait, hint: -1 } };
-        } else if (init) {
+        } else if (init && !branch) {
           // new master branch, bump access time
           log.e[0].time = log.c.time = time;
           branch = sm.log[uid] = log;
@@ -126,7 +126,7 @@ let sm = {
         for (let i = 0; i < log.e.length; i++) {
           let event = log.e[i];
           // image share route and thumbnail
-          if (event.id && event.id.indexOf("i__") === 0) {
+          if (event.id && event.id.toString().indexOf("i__") === 0) {
             let de = sm.lzw.de(event.value);
             // serve route image
             sm.img(de, event.id, { serve: event, pass: 1 / 64 });
@@ -138,6 +138,7 @@ let sm = {
       }
 
       // sort events by time
+      /*
       function multipart(a, b) {
         if ("init" in a || "init" in b) {
           return 0;
@@ -149,6 +150,7 @@ let sm = {
       }
       let sorted = events.slice(tip_sort).sort(multipart);
       branch.e = events.slice(0, tip_sort).concat(sorted);
+      */
 
       // multi-part early abort. should uac/daemon?
       if (log.c.hint > 1) {
@@ -174,66 +176,76 @@ let sm = {
 
       Object.keys(sm.log).forEach((peer) => {
         // node, peer, meta
-        if (peer !== "c" && peer != uid) {
-          //console.log("master key", key);
+        console.log("sm.log keys", peer, uid);
+        let block = cfg.auth[peer] == "deny";
+        if (peer !== "c") {
           let user = sm.log[peer];
-          let u = (revlist[peer] = { c: user.c });
-          let block = cfg.auth[peer] == "deny";
+          if (peer != uid) {
+            //console.log("master key", key);
 
-          // peers init, round-trip, events
-          let pull_hard =
-            branch.c.auth[peer] === "init" &&
-            branch.e[0].init === false &&
-            user.e[0].init === false &&
-            user.e.length > 1;
+            let u = (revlist[peer] = { c: user.c });
 
-          for (let i = user.e.length - 1; i >= 0; i--) {
-            let event = user.e[i];
-            //
-            // if(!pull_hard && event.time)
-            //
+            // peers init, round-trip, events
+            let pull_hard =
+              branch.c.auth[peer] === "init" &&
+              branch.e[0].init === false &&
+              user.e[0].init === false &&
+              user.e.length > 1;
 
-            // commits to revlist, unless own user
-            if (uid != peer) {
-              let tip_push = event.time >= branch.c.time - sm.to;
-              let tip_pull = event.time >= user.c.time - sm.to;
-              // auth new init local
-              let HEAD = (tip_push || tip_pull) && event.time <= time;
-              if ((HEAD && !block) || pull_hard) {
-                // || init
-                u[event.time] = event;
+            for (let i = user.e.length - 1; i >= 0; i--) {
+              let event = user.e[i];
+              //
+              // if(!pull_hard && event.time)
+              //
+
+              // commits to revlist, unless own user
+              if (uid != peer) {
+                let tip_push = event.time >= branch.c.time - sm.to;
+                let tip_pull = event.time >= user.c.time - sm.to;
+                // auth new init local
+                let HEAD = (tip_push || tip_pull) && event.time <= time;
+                if ((HEAD && !block) || pull_hard) {
+                  // || init
+                  u[event.time] = event;
+                }
               }
-            }
-            // prune before HEAD (basic test)
-            if (event.time < branch.c.time) {
-              for (let j = i - 1; j >= 0; j--) {
-                let eventPre = user.e[j];
-                if (event.id == eventPre.id && event.value == eventPre.value) {
-                  user.e.splice(j, 1);
-                  i--;
+              // prune before HEAD (basic test)
+              if (event.time < branch.c.time) {
+                for (let j = i - 1; j >= 0; j--) {
+                  let eventPre = user.e[j];
+                  if (
+                    event.id == eventPre.id &&
+                    event.value == eventPre.value
+                  ) {
+                    user.e.splice(j, 1);
+                    i--;
+                  }
                 }
               }
             }
-          }
 
-          // peer init, full clone singleton
-          if (pull_hard) {
-            branch.c.auth[peer] = "done";
-            //delete branch.c.auth[peer];
-          }
-          // peer init, handshake
-          if (user.c.auth && !user.c.auth[uid] && !block && uid != peer) {
-            user.c.auth[uid] = "init";
+            // peer init, full clone singleton
+            if (pull_hard) {
+              branch.c.auth[peer] = "done";
+              //delete branch.c.auth[peer];
+            }
+            // peer init, handshake
+            if (user.c.auth && !user.c.auth[uid] && !block && uid != peer) {
+              user.c.auth[uid] = "init";
+            }
           }
 
           // user access control
-          const is_server = cfg.uid == peer;
+          //const is_server = cfg.uid == peer;
+          const is_server = peer == cfg.uid;
+          console.log("is_server", is_server, cfg.uid, peer, user);
           if (!is_server && (!block || sm.purge)) {
             // server as user skip: count, events, unload...
-            let active = !!(user.e.length > 1);
-            let recent = 60000 >= time - user.e[0].time;
+            let active = user.e && user.e.length > 1;
+            let recent = user.e && 30000 >= time - user.e[0].time;
             const is_unload = user.c.time == Infinity || (!active && !recent);
             if (is_unload) {
+              console.log("IS_UNLOAD... IS_UNLOAD...");
               // user access
               // deny peer or user.c.uid
               daemon("deny", user.c.uid);
@@ -241,9 +253,11 @@ let sm = {
               users++;
             }
           }
-          // client revlist doesn't use auth...?
-          //u.c.auth = {};
         }
+
+        // client revlist doesn't use auth...?
+        //u.c.auth = {};
+
         // async...?
       });
 
@@ -304,7 +318,7 @@ let sm = {
       part.e.unshift(auth);
     } else {
       // local user events since last GET
-      for (let i = branch.e.length - 1; i >= 0; i--) {
+      for (let i = branch.e.length - 1; i > 0; i--) {
         let event = branch.e[i];
         if (event.time > last) {
           if (JSON.stringify(part).length >= 20480) {
@@ -547,6 +561,8 @@ let sm = {
         target.disabled = true;
         if (id == "server") {
           if (sm.proxy.abortSig.aborted) {
+            // reset fetch
+            // ... also errRetry, users...?
             sm.proxy.abortCtrl = new AbortController();
             sm.proxy.abortSig = sm.proxy.abortCtrl.signal;
             sm.proxy.start();
@@ -584,15 +600,14 @@ let sm = {
           }
 
           // init event and GET loop
-          if (!user.e.length) {
+          if (!user.e.length || !("init" in user.e[0])) {
             user.e.unshift({
               time: Date.now(),
               init: true
             });
           } else {
             // button re-enabled (no server, timeout...)
-
-            if (!server && user.e[0].init != true) {
+            if (!server && user.e[0].init !== true) {
               // attempt reconnect with convoluted uid
               user.c.uid += "c";
               user.e[0].init = true;
