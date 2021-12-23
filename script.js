@@ -19,7 +19,7 @@ let sm = {
     sm.proxy.routes.addGet("/log", "log", (ctx) => {
       let params = ctx.request.url.searchParams.get("log") || "{}";
       let log = JSON.parse(decodeURIComponent(params));
-      console.log("log", log);
+      //console.log("log", log);
 
       // empty or malformed
       if (!log || !log.c || !log.c.uid) {
@@ -102,7 +102,7 @@ let sm = {
           };
           let wait = auth == "deny" ? "Infinity" : queue();
           return { c: { time: wait, hint: -1 } };
-        } else if (init && !branch) {
+        } else if (init) {
           // new master branch, bump access time
           log.e[0].time = log.c.time = time;
           branch = sm.log[uid] = log;
@@ -176,7 +176,7 @@ let sm = {
 
       Object.keys(sm.log).forEach((peer) => {
         // node, peer, meta
-        console.log("sm.log keys", peer, uid);
+        //console.log("sm.log keys", peer, uid);
         let block = cfg.auth[peer] == "deny";
         if (peer !== "c") {
           let user = sm.log[peer];
@@ -238,14 +238,15 @@ let sm = {
           // user access control
           //const is_server = cfg.uid == peer;
           const is_server = peer == cfg.uid;
-          console.log("is_server", is_server, cfg.uid, peer, user);
+          //console.log("is_server", is_server, cfg.uid, peer, user);
+          //console.log("block", block, sm.purge, user.c.time);
           if (!is_server && (!block || sm.purge)) {
             // server as user skip: count, events, unload...
             let active = user.e && user.e.length > 1;
             let recent = user.e && 30000 >= time - user.e[0].time;
             const is_unload = user.c.time == Infinity || (!active && !recent);
             if (is_unload) {
-              console.log("IS_UNLOAD... IS_UNLOAD...");
+              //console.log("IS_UNLOAD... IS_UNLOAD...");
               // user access
               // deny peer or user.c.uid
               daemon("deny", user.c.uid);
@@ -336,12 +337,21 @@ let sm = {
     // route has 20-minute cache ( max ~2048KB * 10 per second )
     let revlogs = document.getElementById("revlist");
     for (let i = 0; i < multi.length; i++) {
+
+      let part = encodeURIComponent(JSON.stringify(multi[i]));
+      
+      if(multi[i].c.time == "Infinity"){
+        // user unload, no delayed multi-part 
+        fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true });
+        continue;
+      }
+      
       let RPS = i * 200;
       setTimeout(() => {
         console.log("multipart", multi[i]);
         let toast = document.createElement("article");
         let status = "";
-        let part = encodeURIComponent(JSON.stringify(multi[i]));
+        
         fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true })
           .then((response) => {
             // response > 19200 may be truncated
@@ -639,12 +649,12 @@ let sm = {
         for (let i = 0; i < files.length; i++) {
           let file = files[i];
           let fr = new FileReader();
-          fr.onload = function () {
+          fr.onloadend = function () {
             let tokenReg = /[^A-Za-z0-9_-]/g;
             let token = "i__" + file.name.replace(tokenReg, "__");
             sm.img(fr.result, token, { type: file.type });
           };
-          fr.readAsDataURL(file);
+          file && fr.readAsDataURL(file);
         }
       }
     } else if (!type) {
