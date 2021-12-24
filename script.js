@@ -3,7 +3,7 @@
 const uid = Date.now();
 const server = location.host.indexOf("httprelay") === -1;
 
-let sm = {
+sm = {
   proxy_url: "//demo.httprelay.io/proxy/" + uid,
   to: 2048 * 2,
   users: 6,
@@ -111,12 +111,14 @@ let sm = {
       }
 
       let events = branch.e;
-      // last fetch ( multi-part 0 ) minus one deviation
-      let tip_sort = branch.c.time - sm.to;
+
+      // last fetch ( multi-part 0 ) minus two deviation
+      let multi_idx = 0;
+      let multi_tip = branch.c.time - sm.to * 2;
       for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i].time < tip_sort) {
+        if (events[i].time < multi_tip) {
           // index to sort multi-part timestamps
-          tip_sort = i;
+          multi_idx = i;
           break;
         }
       }
@@ -138,7 +140,6 @@ let sm = {
       }
 
       // sort events by time
-      /*
       function multipart(a, b) {
         if ("init" in a || "init" in b) {
           return 0;
@@ -148,9 +149,11 @@ let sm = {
           return 0;
         }
       }
-      let sorted = events.slice(tip_sort).sort(multipart);
-      branch.e = events.slice(0, tip_sort).concat(sorted);
-      */
+      
+      // multi-part events add route (async) and sort by timestamp
+      let sorted = events.slice(multi_idx).sort(multipart);
+      branch.e = events.slice(0, multi_idx).concat(sorted);
+      
 
       // multi-part early abort. should uac/daemon?
       if (log.c.hint > 1) {
@@ -175,14 +178,11 @@ let sm = {
       let users = 0;
 
       Object.keys(sm.log).forEach((peer) => {
-        // node, peer, meta
-        //console.log("sm.log keys", peer, uid);
-        let block = cfg.auth[peer] == "deny";
         if (peer !== "c") {
+          let denied = cfg.auth[peer] == "deny";
           let user = sm.log[peer];
-          if (peer != uid) {
-            //console.log("master key", key);
 
+          if (peer != uid) {
             let u = (revlist[peer] = { c: user.c });
 
             // peers init, round-trip, events
@@ -194,21 +194,18 @@ let sm = {
 
             for (let i = user.e.length - 1; i >= 0; i--) {
               let event = user.e[i];
-              //
-              // if(!pull_hard && event.time)
-              //
 
               // commits to revlist, unless own user
-              if (uid != peer) {
-                let tip_push = event.time >= branch.c.time - sm.to;
-                let tip_pull = event.time >= user.c.time - sm.to;
-                // auth new init local
-                let HEAD = (tip_push || tip_pull) && event.time <= time;
-                if ((HEAD && !block) || pull_hard) {
-                  // || init
-                  u[event.time] = event;
-                }
+              //if (peer != uid) {
+              let tip_push = event.time >= branch.c.time - sm.to;
+              let tip_pull = event.time >= user.c.time - sm.to;
+              // auth new init local
+              let HEAD = (tip_push || tip_pull) && event.time <= time;
+              if ((HEAD && !denied) || pull_hard) {
+                // || init
+                u[event.time] = event;
               }
+              //}
               // prune before HEAD (basic test)
               if (event.time < branch.c.time) {
                 for (let j = i - 1; j >= 0; j--) {
@@ -230,25 +227,20 @@ let sm = {
               //delete branch.c.auth[peer];
             }
             // peer init, handshake
-            if (user.c.auth && !user.c.auth[uid] && !block && uid != peer) {
+            if (user.c.auth && !user.c.auth[uid] && !denied) {
               user.c.auth[uid] = "init";
             }
           }
 
           // user access control
-          //const is_server = cfg.uid == peer;
           const is_server = peer == cfg.uid;
-          //console.log("is_server", is_server, cfg.uid, peer, user);
-          //console.log("block", block, sm.purge, user.c.time);
-          if (!is_server && (!block || sm.purge)) {
+          if (!is_server && (!denied || sm.purge)) {
             // server as user skip: count, events, unload...
             let active = user.e && user.e.length > 1;
             let recent = user.e && 30000 >= time - user.e[0].time;
             const is_unload = user.c.time == Infinity || (!active && !recent);
             if (is_unload) {
-              //console.log("IS_UNLOAD... IS_UNLOAD...");
               // user access
-              // deny peer or user.c.uid
               daemon("deny", user.c.uid);
             } else {
               users++;
@@ -258,8 +250,6 @@ let sm = {
 
         // client revlist doesn't use auth...?
         //u.c.auth = {};
-
-        // async...?
       });
 
       // real meta (not uac daemon, pre-revlist)
@@ -299,13 +289,13 @@ let sm = {
     // if URL parameter exceeds boundary, multi-part fetch (like FormData)
     const body = function (boundary) {
       // push local cfg
-      let params = { c: {}, e: [] };
-      Object.keys(branch.c).forEach(function (k) {
-        // multi-part cfg is minimal
-        if (boundary === 0 || k == "uid" || k == "time" || k == "hint") {
-          params.c[k] = branch.c[k];
-        }
-      });
+      let params = { c: { uid: branch.c.uid, time: branch.c.time }, e: [] };
+      //Object.keys(branch.c).forEach(function (k) {
+      // multi-part cfg is minimal
+      //  if (boundary === 0 || k == "uid" || k == "time" || k == "hint") {
+      //    params.c[k] = branch.c[k];
+      //  }
+      //});
       // multi-part fetch returns revlist once
       params.c.hint = boundary + 1;
       return params;
@@ -324,7 +314,8 @@ let sm = {
         if (event.time > last) {
           if (JSON.stringify(part).length >= 20480) {
             let boundary = multi.length;
-            part = multi[boundary] = body(boundary);
+            part = body(boundary);
+            multi.unshift(part);
           }
           // init sends false once more
           part.e.unshift(event);
@@ -334,25 +325,32 @@ let sm = {
       }
     }
 
+    console.log("multipart", multi);
+
     // route has 20-minute cache ( max ~2048KB * 10 per second )
     let revlogs = document.getElementById("revlist");
     for (let i = 0; i < multi.length; i++) {
+      let part = multi[i];
+      // part-specific cfg
+      if (i == 0) {
+        part.c = branch.c;
+      }
+      part.c.hint = i + 1;
 
-      let part = encodeURIComponent(JSON.stringify(multi[i]));
-      
-      if(multi[i].c.time == "Infinity"){
-        // user unload, no delayed multi-part 
-        fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true });
+      let params = encodeURIComponent(JSON.stringify(part));
+
+      if (part.c.time == "Infinity") {
+        // user unload, no delayed multi-part
+        fetch(sm.proxy_url + "/log?log=" + params, { keepalive: true });
         continue;
       }
-      
+
       let RPS = i * 200;
       setTimeout(() => {
-        console.log("multipart", multi[i]);
         let toast = document.createElement("article");
         let status = "";
-        
-        fetch(sm.proxy_url + "/log?log=" + part, { keepalive: true })
+
+        fetch(sm.proxy_url + "/log?log=" + params, { keepalive: true })
           .then((response) => {
             // response > 19200 may be truncated
             if (!response.ok || response.status !== 200) {
@@ -506,8 +504,9 @@ let sm = {
         sm.log.c.uid
       );
       // dependency
-      let serverId = document.createElement("script");
-      serverId.textContent = "const serverId = " + sm.log.c.uid;
+      let globals = document.createElement("script");
+      globals.textContent += "let sm;";
+      globals.textContent += "const serverId = " + sm.log.c.uid + ";";
       let js = document.createElement("script");
       js.src = "//codepen.io/kpachinger/pen/VwzmKJV.js";
 
@@ -516,7 +515,7 @@ let sm = {
         let doc = document.implementation.createHTMLDocument(
           "HTTPRelay-js Client"
         );
-        doc.head.appendChild(serverId);
+        doc.head.appendChild(globals);
         doc.body.appendChild(template);
         doc.body.appendChild(js);
         return doc;
@@ -715,9 +714,9 @@ let sm = {
           // increment (dimensions/quality) until within max filesize
           let thumb = resize(type, j);
           if (thumb.length <= 9_600) {
-            // use additional iteration if > 50% reduction
+            // use additional iteration if > 75% reduction
             let thumberer = resize(type, j - inc);
-            thumb = thumberer.length / thumb.length < 0.5 ? thumberer : thumb;
+            thumb = thumberer.length / thumb.length < 0.75 ? thumberer : thumb;
             // use minimum size file of types
             file = thumb.length < output.thumb.length ? thumb : file;
             break;
@@ -804,24 +803,26 @@ let sm = {
   }
 };
 
-if (server) {
-  // server: load proxy & SERVE
-  let script = document.createElement("script");
-  script.src = "//unpkg.com/httprelay@0.0.44/lib/non-mod/httprelay.js";
-  script.onload = function () {
+window.onload = function (e) {
+  if (server) {
+    // server: load proxy & SERVE
+    let script = document.createElement("script");
+    script.src = "//unpkg.com/httprelay@0.0.44/lib/non-mod/httprelay.js";
+    script.onload = function () {
+      sm.proxy_init();
+    };
+    document.head.appendChild(script);
+  } else {
+    // client: load proxy & GET
+    sm.log.c.uid = serverId;
+    sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
     sm.proxy_init();
-  };
-  document.head.appendChild(script);
-} else {
-  // client: load proxy & GET
-  sm.log.c.uid = serverId;
-  sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
-  sm.proxy_init();
-  window.onbeforeunload = function () {
-    // unload stricter
-    sm.log[uid].c.time = "Infinity";
-    sm.GET({
-      time: "Infinity"
-    });
-  };
-}
+    window.onbeforeunload = function () {
+      // unload stricter
+      sm.log[uid].c.time = "Infinity";
+      sm.GET({
+        time: "Infinity"
+      });
+    };
+  }
+};
