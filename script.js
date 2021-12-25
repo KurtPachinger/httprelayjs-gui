@@ -149,11 +149,9 @@ sm = {
           return 0;
         }
       }
-      
-      // multi-part events add route (async) and sort by timestamp
+      // live events list is async
       let sorted = events.slice(multi_idx).sort(multipart);
       branch.e = events.slice(0, multi_idx).concat(sorted);
-      
 
       // multi-part early abort. should uac/daemon?
       if (log.c.hint > 1) {
@@ -163,7 +161,6 @@ sm = {
       // push branch cfg to master
       Object.keys(log.c).forEach((meta) => {
         if (init || (meta != "time" && meta != "auth")) {
-          // && meta != hint ??
           branch.c[meta] = log.c[meta];
         }
       });
@@ -417,8 +414,10 @@ sm = {
               if (key == "c") {
                 if (!server) {
                   // pull revlist cfg unless server or error
-                  sm.log[key].hint = merge.hint;
+                  // hint is latency (client-specific)
+                  sm.log.c.hint = merge.hint;
                 }
+                
                 card.style.backgroundColor = "#efefef";
               } else {
                 // user style
@@ -465,8 +464,9 @@ sm = {
             console.error("revlist", error);
           })
           .finally(() => {
-            // server error: status (-1, 401)
             if (typeof status == "number") {
+              // server error: status (-1, 401)
+              // possibly a multi-part
               status = "serve error: " + status;
               document.getElementById("client").disabled = false;
               clearTimeout(sm.sto);
@@ -665,6 +665,8 @@ sm = {
   img: function (img, token, opts = {}) {
     let type = opts.type || "image/jpeg";
     let pass = opts.pass || 1 / 2;
+    
+    // pass multiple (latency, archive)
 
     // load image source
     let output = {};
@@ -699,6 +701,7 @@ sm = {
         canvas.width = width * inc;
         canvas.height = height * inc;
         ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
         return canvas.toDataURL(type, inc);
       };
 
@@ -803,26 +806,26 @@ sm = {
   }
 };
 
-window.onload = function (e) {
-  if (server) {
-    // server: load proxy & SERVE
-    let script = document.createElement("script");
-    script.src = "//unpkg.com/httprelay@0.0.44/lib/non-mod/httprelay.js";
-    script.onload = function () {
-      sm.proxy_init();
-    };
-    document.head.appendChild(script);
-  } else {
-    // client: load proxy & GET
-    sm.log.c.uid = serverId;
-    sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
+
+// loaded?
+if (server) {
+  // server: load proxy & SERVE
+  let script = document.createElement("script");
+  script.src = "//unpkg.com/httprelay@0.0.44/lib/non-mod/httprelay.js";
+  script.onload = function () {
     sm.proxy_init();
-    window.onbeforeunload = function () {
-      // unload stricter
-      sm.log[uid].c.time = "Infinity";
-      sm.GET({
-        time: "Infinity"
-      });
-    };
-  }
-};
+  };
+  document.head.appendChild(script);
+} else {
+  // client: load proxy & GET
+  sm.log.c.uid = serverId;
+  sm.proxy_url = "https://demo.httprelay.io/proxy/" + sm.log.c.uid;
+  sm.proxy_init();
+  window.onbeforeunload = function () {
+    // unload stricter
+    sm.log[uid].c.time = "Infinity";
+    sm.GET({
+      time: "Infinity"
+    });
+  };
+}
